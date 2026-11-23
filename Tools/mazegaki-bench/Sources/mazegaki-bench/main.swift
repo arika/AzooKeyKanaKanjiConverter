@@ -11,6 +11,11 @@ import KanaKanjiConverterModuleWithDefaultDictionary
 //   --limit N           Zenzai の inferenceLimit（既定 1）
 //   --expand            「漢字を開く」方式で変換する（既定は入力そのまま＝漢字を素通し）
 //   --cap N             --expand 時に試す読み組合せの上限（既定 32）
+//   --reading-table P   読み表のパス（既定 data/kanji_readings.tsv）
+//   --readings R        --expand 時の読みの派生規則。legacy（既定。Step 0 と同じ: 語幹・促音化・連濁、上限なし）
+//                       または library（ライブラリと同じ: 上限つきの語幹・促音化・連濁・連用形・連用形の連濁）
+//   --max-readings N    --readings library のときの、1 字あたりの表の読みの上限（既定 8）
+//   --dump-readings P   --readings library の派生結果を P に書き出して終了する（ライブラリとの突き合わせ用）
 //   --quiet             候補一覧を出さず結果行だけ表示
 //   --table PATH        入力をキー列とみなし、カスタム入力テーブル(TSV)経由で変換（漢直テーブルの動作確認用）
 //   --cases PATH        テストケースを TSV から読む（カテゴリ<TAB>入力<TAB>正解1,正解2,…[<TAB>任意]、# 行は無視）。
@@ -123,6 +128,10 @@ var modelPath = "models/zenz-v3.1-small-Q5_K_M.gguf"
 var inferenceLimit = 1
 var expandMode = false
 var comboCap = 32
+enum ReadingRules: String { case legacy, library }
+var readingRules = ReadingRules.legacy
+var maxReadingsPerKanji = 8
+var readingTablePath = "data/kanji_readings.tsv"
 var quiet = false
 var tablePath: String? = nil   // 指定時: 入力をキー列とみなし、カスタム入力テーブル(TSV)経由で ComposingText を作る
 var casesPath: String? = nil
@@ -137,10 +146,16 @@ do {
         case "--limit": inferenceLimit = Int(it.next() ?? "") ?? inferenceLimit
         case "--expand": expandMode = true
         case "--cap": comboCap = Int(it.next() ?? "") ?? comboCap
+        case "--readings":
+            guard let r = it.next().flatMap(ReadingRules.init(rawValue:)) else { print("--readings は legacy か library"); exit(1) }
+            readingRules = r
+        case "--reading-table": readingTablePath = it.next() ?? readingTablePath
+        case "--max-readings": maxReadingsPerKanji = Int(it.next() ?? "") ?? maxReadingsPerKanji
         case "--quiet": quiet = true
         case "--table": tablePath = it.next()
         case "--cases": casesPath = it.next()
         case "--out": outPath = it.next()
+        case "--dump-readings": _ = it.next()
         default: inputArgs.append(a)
         }
     }
@@ -160,7 +175,7 @@ if useZenzai {
 } else {
     zenzaiMode = .off
 }
-print("Zenzai: \(useZenzai ? "ON (inferenceLimit=\(inferenceLimit))" : "OFF")  方式: \(expandMode ? "漢字を開く (cap=\(comboCap))" : "素通し")")
+print("Zenzai: \(useZenzai ? "ON (inferenceLimit=\(inferenceLimit))" : "OFF")  方式: \(expandMode ? "漢字を開く (cap=\(comboCap), readings=\(readingRules.rawValue)\(readingRules == .library ? " max=\(maxReadingsPerKanji)" : ""), table=\(readingTablePath))" : "素通し")")
 
 let converter = KanaKanjiConverter.withDefaultDictionary()
 
@@ -242,9 +257,9 @@ func pad(_ s: String, _ width: Int) -> String {
 // MARK: - 漢字読み表（KANJIDIC2 由来: data/kanji_readings.tsv）
 
 let kanjiReadings: [Character: [String]] = {
-    guard let text = try? String(contentsOfFile: "data/kanji_readings.tsv", encoding: .utf8) else {
+    guard let text = try? String(contentsOfFile: readingTablePath, encoding: .utf8) else {
         if expandMode {
-            print("data/kanji_readings.tsv が読めません")
+            print("\(readingTablePath) が読めません")
             exit(1)
         }
         return [:]
@@ -253,7 +268,14 @@ let kanjiReadings: [Character: [String]] = {
     for line in text.split(separator: "\n") where !line.hasPrefix("#") {
         let cols = line.split(separator: "\t")
         guard cols.count == 2, let k = cols[0].first else { continue }
-        dict[k] = cols[1].split(separator: ",").map(String.init)
+        // 表は送り仮名を `.` の後ろに持つ（Docs/converter_api.md の形式）。そのまま保持し、派生の段階で解釈する。
+        // CJK 互換漢字は Character としては統合漢字と等しいので、同じキーの行が複数現れる。
+        // legacy は Step 0 と同じく後の行で上書きし、library はライブラリと同じく読みを連結する
+        let rs = cols[1].split(separator: ",").map(String.init)
+        switch readingRules {
+        case .legacy: dict[k] = rs
+        case .library: dict[k, default: []].append(contentsOf: rs)
+        }
     }
     return dict
 }()
@@ -265,9 +287,22 @@ let dakuten: [Character: [Character]] = [
     "ハ": ["バ", "パ"], "ヒ": ["ビ", "ピ"], "フ": ["ブ", "プ"], "ヘ": ["ベ", "ペ"], "ホ": ["ボ", "ポ"],
 ]
 
-/// 漢字 1 字の読み候補（優先順）: 表の読み → 促音化 → 連濁
+/// 漢字 1 字の読み候補（優先順）
 @MainActor func readingVariants(of k: Character) -> [String] {
-    guard let base = kanjiReadings[k] else { return [] }
+    guard let notations = kanjiReadings[k] else { return [] }
+    switch readingRules {
+    case .legacy: return legacyReadingVariants(notations)
+    case .library: return libraryReadingVariants(notations, limit: maxReadingsPerKanji)
+    }
+}
+
+/// Step 0 の規則: 表の読みの語幹（上限なし） → 促音化 → 連濁
+func legacyReadingVariants(_ notations: [String]) -> [String] {
+    var base: [String] = []
+    for n in notations {
+        let stem = String(n.split(separator: ".", omittingEmptySubsequences: false)[0])
+        if !stem.isEmpty, !base.contains(stem) { base.append(stem) }
+    }
     var result = base
     func add(_ s: String) { if !result.contains(s) { result.append(s) } }
     for r in base {
@@ -279,6 +314,64 @@ let dakuten: [Character: [Character]] = [
         for v in vs { add(String(v) + r.dropFirst()) }
     }
     return result
+}
+
+/// ライブラリ（MazegakiReadingTable.derive）と同じ規則。ライブラリの型は package アクセスでベンチから使えないので写している。
+/// ライブラリ側の規則を変えたら、ここも合わせること。PR2 の `--mazegaki` ではエンジンが直接使うので、この写しは不要になる。
+/// 語幹（上限 limit） → 促音化 → 連濁 → 連用形 → 連用形の連濁
+func libraryReadingVariants(_ notations: [String], limit: Int) -> [String] {
+    func isKatakana(_ c: Character) -> Bool {
+        guard c.unicodeScalars.count == 1, let v = c.unicodeScalars.first?.value else { return false }
+        return (0x30A1...0x30FA).contains(v) || v == 0x30FC
+    }
+    var seen: Set<String> = []
+    var bases: [(stem: String, okurigana: String)] = []
+    for n in notations {
+        guard bases.count < limit else { break }
+        let normalized = String(n.filter { $0 != "-" && !$0.isWhitespace })
+        let parts = normalized.split(separator: ".", maxSplits: 1, omittingEmptySubsequences: false)
+        let stem = String(parts[0]), oku = parts.count == 2 ? String(parts[1]) : ""
+        guard !stem.isEmpty, stem.allSatisfy(isKatakana), oku.allSatisfy(isKatakana),
+              seen.insert(stem + "." + oku).inserted else { continue }
+        bases.append((stem, oku))
+    }
+    func sokuon(_ r: String) -> String? {
+        guard r.count >= 2, let last = r.last, "キクチツ".contains(last) else { return nil }
+        return r.dropLast() + "ッ"
+    }
+    func rendaku(_ r: String) -> [String] {
+        guard let first = r.first, let vs = dakuten[first] else { return [] }
+        return vs.map { String($0) + r.dropFirst() }
+    }
+    let godan: [Character: Character] = ["ウ": "イ", "ク": "キ", "グ": "ギ", "ス": "シ", "ツ": "チ", "ヌ": "ニ", "ブ": "ビ", "ム": "ミ", "ル": "リ"]
+    let ie = Set("イキギシジチヂニヒビピミリ" + "エケゲセゼテデネヘベペメレ")
+    func conjunctive(_ stem: String, _ oku: String) -> String? {
+        guard let last = oku.last else { return nil }
+        let body = oku.dropLast()
+        if last == "ル", let prev = body.last, ie.contains(prev) { return stem + body }
+        guard let i = godan[last] else { return nil }
+        return stem + body + String(i)
+    }
+    var result: [String] = []
+    func add(_ r: String) { if !result.contains(r) { result.append(r) } }
+    // ペナルティ: 語幹 0 < 促音化 1 = 連濁 1 < 連用形 2 < 連用形の連濁 3（同じペナルティは由来の順）
+    for b in bases { add(b.stem) }
+    for b in bases { if let x = sokuon(b.stem) { add(x) } }
+    for b in bases { rendaku(b.stem).forEach(add) }
+    let conj = bases.compactMap { conjunctive($0.stem, $0.okurigana) }
+    conj.forEach(add)
+    for c in conj { rendaku(c).forEach(add) }
+    return result
+}
+
+if let i = CommandLine.arguments.firstIndex(of: "--dump-readings"), i + 1 < CommandLine.arguments.count {
+    // 読みの派生結果を書き出して終了する（ライブラリの規則と突き合わせるため）
+    var out = ""
+    for k in kanjiReadings.keys.sorted() {
+        out += "\(k)\t\(libraryReadingVariants(kanjiReadings[k]!, limit: maxReadingsPerKanji).joined(separator: ","))\n"
+    }
+    try out.write(toFile: CommandLine.arguments[i + 1], atomically: true, encoding: .utf8)
+    exit(0)
 }
 
 // MARK: - 展開方式の本体
