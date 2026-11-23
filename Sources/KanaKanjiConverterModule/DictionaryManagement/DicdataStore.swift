@@ -585,6 +585,15 @@ public final class DicdataStore {
             }
         }
 
+        // MARK: 交ぜ書き変換: 入力に漢字が含まれる場合だけ有効にする
+        // `.off`の場合と、入力に漢字が含まれない場合は`nil`で、以降の処理は従来と同一になる
+        let mazegakiTable: MazegakiReadingTable? = if let table = state.mazegakiReadingTable,
+            composingText.convertTarget.contains(where: { Self.isMazegakiConstrainedCharacter($0, table: table) }) {
+            table
+        } else {
+            nil
+        }
+
         // MARK: 誤り訂正の対象を列挙する。非常に重い処理。
         let (stringToInfo, indices, additionalDicdata) = self.movingTowardPrefixSearch(
             composingText: composingText,
@@ -601,6 +610,9 @@ public final class DicdataStore {
             guard let info = stringToInfo[rubyArray] else {
                 continue
             }
+            if let mazegakiTable, !Self.satisfiesMazegakiConstraintsOnSurface(element, table: mazegakiTable) {
+                continue
+            }
             if let element = penaltizedElementIfFeasible(consume element, rubyCount: rubyArray.count, penalty: info.penalty) {
                 appendNode(element, endIndex: info.endIndex)
             }
@@ -615,8 +627,55 @@ public final class DicdataStore {
                 guard let info = stringToInfo[rubyArray] else {
                     continue
                 }
+                if let mazegakiTable, !Self.satisfiesMazegakiConstraintsOnSurface(element, table: mazegakiTable) {
+                    continue
+                }
                 if let element = penaltizedElementIfFeasible(consume element, rubyCount: rubyArray.count, penalty: info.penalty) {
                     appendNode(element, endIndex: info.endIndex)
+                }
+            }
+        }
+
+        // MARK: 交ぜ書き変換: 入力漢字を読みに展開したキーで引き、整合判定を通った語を加える
+        if let mazegakiTable, let surfaceProcessRange {
+            let generator = MazegakiGenerator(
+                surface: Array(composingText.convertTarget.toKatakana()),
+                range: surfaceProcessRange,
+                table: mazegakiTable
+            )
+            if generator.hasExpandableKanji {
+                let (mazegakiStringToInfo, mazegakiIndices, mazegakiDynamicDicdata) = self.mazegakiPrefixSearch(
+                    generator: generator,
+                    useMemory: state.learningMemoryManager.enabled,
+                    state: state
+                )
+                func appendMazegakiNodes(_ element: borrowing DicdataElement) {
+                    let rubyArray = Array(element.ruby)
+                    guard let infos = mazegakiStringToInfo[rubyArray] else {
+                        return
+                    }
+                    // 整合判定を通った展開のうち、終わりの位置ごとにペナルティが最小のもの
+                    var best: [Int: PValue] = [:]
+                    for info in infos where best[info.endIndex].map({ info.penalty < $0 }) ?? true {
+                        if MazegakiAlignment.matches(word: element.word, ruby: rubyArray, constraints: info.constraints) {
+                            best[info.endIndex] = info.penalty
+                        }
+                    }
+                    for (endIndex, penalty) in best {
+                        let adjust = -Self.mazegakiPenaltyWeight * penalty
+                        if !adjust.isZero, self.shouldBeRemoved(value: element.value() + adjust, wordCount: rubyArray.count) {
+                            continue
+                        }
+                        appendNode((copy element).adjustedData(adjust), endIndex: .surface(endIndex))
+                    }
+                }
+                for element in mazegakiDynamicDicdata {
+                    appendMazegakiNodes(element)
+                }
+                for (identifier, value) in mazegakiIndices {
+                    for element in self.getDicdataFromLoudstxt3(identifier: identifier, indices: value, state: state) {
+                        appendMazegakiNodes(element)
+                    }
                 }
             }
         }
@@ -634,6 +693,10 @@ public final class DicdataStore {
                     keyboardLanguage: state.keyboardLanguage
                 )
                 for element in result {
+                    // 交ぜ書き変換では、入力漢字を異体字に置き換える候補（桜→櫻など）を出さない
+                    if let mazegakiTable, !Self.satisfiesMazegakiConstraintsOnSurface(element, table: mazegakiTable) {
+                        continue
+                    }
                     appendNode(element, endIndex: .surface(i))
                 }
             }
@@ -1170,5 +1233,127 @@ public final class DicdataStore {
         }
 
         return true
+    }
+}
+
+// MARK: - 交ぜ書き変換
+extension DicdataStore {
+    /// 交ぜ書き変換で展開した文字列 1 つぶんの情報
+    struct MazegakiInfo {
+        /// `convertTarget`での終わりの位置
+        var endIndex: Int
+        /// 読みのペナルティの合計
+        var penalty: PValue
+        var constraints: [MazegakiConstraint]
+    }
+
+    /// 読みのペナルティ 1 あたりに、語の値から引く量
+    static let mazegakiPenaltyWeight: PValue = 1.0
+
+    /// 交ぜ書き変換で制約の対象になる文字（読み表にある字と、表意文字）か
+    static func isMazegakiConstrainedCharacter(_ character: Character, table: MazegakiReadingTable) -> Bool {
+        !table.readings(of: character).isEmpty || MazegakiGenerator.isIdeographic(character)
+    }
+
+    /// 既存の経路（素通し・誤り訂正）で見つかった語について、ruby に入力漢字がそのまま残っている位置に制約をかけて整合判定する。
+    /// 入力漢字が別の字（正準等価でない異体字など）に置き換わる語を除くため。ruby に入力漢字がなければ常に`true`。
+    static func satisfiesMazegakiConstraintsOnSurface(_ element: borrowing DicdataElement, table: MazegakiReadingTable) -> Bool {
+        let ruby = Array(element.ruby)
+        var constraints: [MazegakiConstraint] = []
+        for (i, character) in ruby.enumerated() where Self.isMazegakiConstrainedCharacter(character, table: table) {
+            constraints.append(MazegakiConstraint(kanji: character, rubyRange: i ..< i + 1))
+        }
+        if constraints.isEmpty {
+            return true
+        }
+        return MazegakiAlignment.matches(word: element.word, ruby: ruby, constraints: constraints)
+    }
+
+    /// 交ぜ書き変換で展開した文字列で辞書を引く。
+    ///
+    /// `movingTowardPrefixSearch`とは別の`MovingTowardPrefixSearchHelper`を使い、既存の経路の結果に影響しないようにする。
+    /// 同じ文字列が、終わりの位置や制約の違う展開から生じることがあるので、文字列ごとに情報を配列で持つ。
+    func mazegakiPrefixSearch(
+        generator: consuming MazegakiGenerator,
+        useMemory: Bool,
+        state: DicdataStoreState
+    ) -> (
+        stringToInfo: [[Character]: [MazegakiInfo]],
+        indices: [(key: String, indices: [Int])],
+        dynamicDicdata: [DicdataElement]
+    ) {
+        var targetLOUDS: [String: LOUDS.MovingTowardPrefixSearchHelper] = [:]
+        var stringToInfo: [[Character]: [MazegakiInfo]] = [:]
+        // 一度引いた文字列の、たどれた最大の位置
+        var availableMaxIndexCache: [[Character]: Int] = [:]
+        var dynamicDicdata: [DicdataElement] = []
+        var minCount = Int.max
+        while let output = generator.next() {
+            let characters = output.characters
+            guard let firstCharacter = characters.first else {
+                continue
+            }
+            stringToInfo[characters, default: []].append(
+                MazegakiInfo(endIndex: output.endIndex, penalty: output.penalty, constraints: output.constraints)
+            )
+            minCount = min(minCount, characters.count)
+            let availableMaxIndex: Int
+            if let cached = availableMaxIndexCache[characters] {
+                availableMaxIndex = cached
+            } else {
+                var maxIndex = 0
+                let charIDs = characters.map(self.character2charId(_:))
+                let keys: [String] = if useMemory {
+                    [String(firstCharacter), "user", "memory"]
+                } else {
+                    [String(firstCharacter), "user"]
+                }
+                for key in keys {
+                    withMutableValue(&targetLOUDS[key]) { helper in
+                        if helper == nil, let louds = self.loadLOUDS(query: key, state: state) {
+                            helper = LOUDS.MovingTowardPrefixSearchHelper(louds: louds)
+                        }
+                        guard helper != nil else {
+                            return
+                        }
+                        maxIndex = max(maxIndex, helper!.update(target: charIDs).availableMaxIndex)
+                    }
+                }
+                // 一時学習: この文字列とちょうど同じ長さのものだけを取る（接頭辞を共有する文字列ごとに重複しないように）
+                let result = state.learningMemoryManager.movingTowardPrefixSearchOnTemporaryMemory(
+                    charIDs: charIDs,
+                    depth: characters.count - 1 ..< characters.count
+                )
+                maxIndex = max(maxIndex, result.availableMaxIndex)
+                for (_, dicdata) in result.dicdata {
+                    dynamicDicdata.append(contentsOf: dicdata)
+                }
+                if !state.dynamicUserDictionary.isEmpty {
+                    let katakanaString = String(characters)
+                    dynamicDicdata.append(contentsOf: self.getMatchDynamicUserDict(katakanaString, state: state))
+                    if state.dynamicUserDictionary.contains(where: { $0.ruby.count > katakanaString.count && $0.ruby.hasPrefix(katakanaString) }) {
+                        maxIndex = max(maxIndex, characters.endIndex - 1)
+                    }
+                }
+                availableMaxIndexCache[characters] = maxIndex
+                availableMaxIndex = maxIndex
+            }
+            if availableMaxIndex < characters.endIndex - 1 {
+                // 到達不可能だった接頭辞を通知する
+                generator.setUnreachablePath(prefixLength: availableMaxIndex + 2)
+            }
+        }
+        if minCount == .max {
+            return ([:], [], [])
+        }
+        return (
+            stringToInfo,
+            targetLOUDS.map { (key, helper) in
+                // 分岐の行き来で同じノードを再訪することがあるので重複を除く
+                var seen: Set<Int> = []
+                return (key, helper.indicesInDepth(depth: minCount - 1 ..< .max).filter { seen.insert($0).inserted })
+            },
+            dynamicDicdata
+        )
     }
 }
