@@ -1,0 +1,130 @@
+# 交ぜ書き変換 作業計画（フォーク内部用）
+
+upstream 向けの説明は `Docs/Visions/mazegaki.md` にある。この文書は作業の手順と受け入れ基準をまとめる。
+行番号は 0.11.2 / fddde10 時点のもの。必ず関数名で検索し直すこと。
+
+## 前提
+
+- 分岐元は azooKey-Desktop の `Core/Package.swift` が固定している revision（fddde10）。
+  upstream の main が進んだら、PR を出す前に rebase する。
+- 事前検証の実装は `Tools/mazegaki-bench/Sources/mazegaki-bench/main.swift` にある。
+  - 判定ロジックの参照実装: `alignWord`、`satisfies`、`readingVariants`
+  - テストケース 52 件: `builtinCases`
+  - 外付け展開方式: `convertExpanded`
+
+## 変更範囲
+
+| # | 場所 | 変更 | PR |
+|---|---|---|---|
+| E1 | `ConverterAPI/ConvertRequestOptions.swift` | `MazegakiMode` と `mazegakiMode` 引数（既定値 `.off`） | 1 |
+| E2 | `DictionaryManagement/Mazegaki/`（新規） | 読み表のローダとキャッシュ、読みの派生（促音化・連濁）とペナルティ | 1 |
+| E3 | `DicdataStore.swift` の `UnifiedGenerator` | `MazegakiGenerator`（`SurfaceGenerator` と同じインターフェース。入力漢字の位置で読みに分岐する深さ優先の生成器） | 2 |
+| E4 | `DicdataStore.movingTowardPrefixSearch` | 生成器が返す情報に制約を足す。`stringToInfo` を同じキーでまとめる処理で、制約の異なるものを潰さない | 2 |
+| E5 | `DicdataStore.lookupDicdata` | 展開キー由来の語に整合判定をかけて `appendNode` する。辞書・動的ユーザ辞書・一時学習のすべての経路に適用する | 2 |
+| E6 | 候補の後処理 | 入力と同じ文字列の候補を、交ぜ書きモードでは下位へ回す | 2 |
+| E7 | `KanaKanjiConverter` の `checkRuby` | 交ぜ書きを考慮した完全一致の判定 | 3 |
+| E8 | `Prediction.getPredictionCandidates` | `lastRuby` を候補の ruby から作る | 3 |
+| E9 | `ZenzaiCache.getNewConstraint` | 位置の対応を `LatticeRange` で取る | 3 |
+| E10 | Zenzai のプロンプト | 案A（漢字のまま渡す）と案B（候補の ruby を渡す）を比較する | 4 |
+| T | `Tests/KanaKanjiConverterModuleTests/` ほか | 整合判定の単体テスト、不変条件のテスト、`.off` との同一性のテスト | 各 PR |
+
+## 手順と受け入れ基準
+
+### Step 0: ベースライン
+
+1. `Tools/mazegaki-bench` をビルドし、素通し方式と外付け展開方式の結果を、自分の環境で記録し直す。
+   参考値（fddde10、M2 Pro、macOS 27）: 素通しは 1 位 7 / 圏外 36、外付け展開は 1 位 46 / 圏外 3。
+2. 読み表を生成する（`scripts/kanjidic2tsv.py`）。生成物はコミットしない（`.gitignore` に追加する）。
+3. 手元専用の評価セットを作る（下の「mazegaki-dic の利用」を参照）。
+   - `ipadic.maze.txt` から、交ぜ書きのキーと正解の単語の組を抜き出す。
+   - 乱数の種を固定し、数千件をサンプリングする。
+   - 出力先は `Tools/mazegaki-bench/data/`（`.gitignore` 済み）。
+   - ベンチに `--cases <TSV>` を追加し、この評価セットを素通し方式と外付け展開方式で計測する。
+
+**受け入れ基準:** 基準値が記録されている（内蔵の 52 件と、mazegaki-dic 由来の評価セットの両方）。
+
+### Step 1 → PR1: API と読み表
+
+1. `MazegakiMode` の API 案を利用者に提示し、承認を得てから実装する。
+2. ローダ、派生、上限、表にない漢字の扱い（展開しない）を単体テストする。テスト用の表は自作の小さなもの。
+3. 読みの派生に、送り仮名を吸収した連用形を加える。
+   - 例: 通（とお.る）→ トオリ、切（き.る）→ キリ、取（と.る）→ トリ。`取ひき→取引` を取れるようにする。
+   - 連濁と組み合わせた形（ドオリ）も作る。
+   - 語幹だけの読みより強いペナルティを付ける。
+   - 実装の場所:
+     - 読み表を作る側（`scripts/kanjidic2tsv.py` が `.` 以降の送り仮名も出力する）
+     - ライブラリ側（表の形式を拡張して、連用形を派生する）
+   - どちらにするかは利用者に提示して決める。ライブラリ側にする場合は、表の形式を API の文書に書く。
+4. 名前の読み（KANJIDIC の nanori。谷=ヤ、原=ワラ など）は既定では入れない。
+   - 評価セットで、入れた場合と入れない場合の精度を比べて報告する。
+
+**受け入れ基準:**
+- `swift test` がすべて通る。
+- `.off` でベンチマークの結果が Step 0 と完全に一致する。
+- mazegaki-dic での読みの取りこぼし率（下記）が、10.3% から下がっている。
+
+### Step 2 → PR2: 辞書引きへの組み込み
+
+1. 実装の前に、`movingTowardPrefixSearch` / `lookupDicdata` の現行の実装を読み、設計を利用者に説明して同意を得る。
+   特に `stringToInfo` の衝突（同じカタカナ列で、素通しと展開、あるいは制約違いが生じる）への対処を説明すること。
+2. `MazegakiGenerator`、制約の受け渡し、整合判定、入力と同じ文字列の候補の降格を実装する。
+3. ベンチマークに `--mazegaki`（エンジン組み込み版）を追加する。
+4. テスト:
+   - 不変条件: すべてのケースで、入力漢字が候補から消えない。
+   - 制約: `機のう` の候補に `帰納` と `昨日` がない。`帰のう` の候補に `帰納` がある。
+   - 同一性: 漢字を含まない入力では `.on` と `.off` の結果が同じ。
+
+**受け入れ基準:**
+- Zenzai オフで 1 位が 46/52 以上。
+- 入力漢字の消失 0 件。
+- 1 打鍵あたりの時間が、文のケースで素通し方式の 3 倍以内、かつ 20ms 以下（計測環境を併記する）。
+- 漢字を含まない入力では、時間が `.off` と同等。
+
+### Step 3 → PR3: ruby と convertTarget が一致する前提の解消
+
+1. E7〜E9 のそれぞれについて、先に失敗するテストを書いてから修正する。
+2. 1 文字ずつ入力したときと一括で入力したときで結果が一致することをテストする
+   （打鍵ごとの差分更新 `SuffixReplacementProcessing` / `buildLatticeWithIncrementalCache` の確認）。
+3. 学習: `き損` → `毀損` を確定して学習させた後、もう一度 `き損` と入力すると `毀損` が上位に来ること。
+
+**受け入れ基準:** テストが通る。ベンチマークが Step 2 より悪化しない。
+
+### Step 4 → PR4: Zenzai
+
+案A と案B を比較して報告する。どちらを採用するかは利用者が決める。
+
+**受け入れ基準:** 比較結果の表。採用案の実装。Zenzai オン時に入力漢字の消失 0 件。
+
+## mazegaki-dic の利用（手元専用）
+
+[oktopus1959/mazegaki-dic](https://github.com/oktopus1959/mazegaki-dic) は、mecab-ipadic の単語を交ぜ書きの形に展開した辞書。
+変換用の辞書としては取り込まない。理由は次のとおり。
+
+- 19.1 万語に対して交ぜ書きの項目が 48 万件あり、大きい。
+- ipadic の語彙に限られ、活用形と学習した語を扱えない。
+- キーに漢字が入る。
+
+用途は次の 2 つに限る。データはコミットしない（`CLAUDE.md` の原則 3）。
+
+1. **読みの規則を検証する。** 漢字 1 字だけをかなにした項目（`迅そく→迅速`）から、単語の中での読みを抜き出し、読み表と派生規則で取れるかを数える。
+   - 事前の分析: 16,127 組（4,406 字）のうち、出現回数で 10.3% が、KANJIDIC と促音化・連濁で取れなかった。
+   - 取れなかった読みの主なもの:
+     - 送り仮名を吸収した訓読み（トオリ、キリ、イリ、ヒキ）
+     - 名前の読み（ヤ、ワラ、ヒデ）
+   - 分析スクリプトを `Tools/mazegaki-bench/scripts/mazedic_stats.py` に置く。スクリプトはコミットしてよい。
+2. **評価セットにする。** 項目の数が多く、作成者の偏りが少ない。
+   - ただし単語単位で、文脈がない。
+   - 熟字訓が機械的に分割された不自然な項目（`今う→今日`、`大とな→大人`）が混ざる。熟字訓の語は除外する。
+   - 1 つのキーに正解が複数ある項目（`き損` → 毀損・棄損）は、どれか 1 つが 5 位以内に入れば正解とする。
+
+## 公開用ブランチ `mazegaki` の更新
+
+- Step ごとに PR ブランチを `mazegaki` へ merge する。Desktop のフォークは `mazegaki` の commit を revision で参照する。
+- `mazegaki` を更新したら、Desktop のフォークの `Core/Package.swift` の revision も更新するよう、利用者に報告する。
+
+## リスク
+
+- `stringToInfo` の衝突（Step 2 の設計の要点）
+- 読みの多い字が続く場合の性能。`setUnreachablePath` による刈り込みの効果は実測するまで分からない。
+- 内蔵の評価データは 52 件と少なく、作成者の偏りがある。mazegaki-dic 由来の評価セットで補うが、こちらは単語単位で文脈がない。
+- 読みを増やすと誤った候補も増える。送り仮名を吸収した連用形や名前の読みは、ペナルティの調整が必要。
