@@ -31,9 +31,23 @@
 
 - `main`: upstream の main を追従するだけ。ここに直接コミットしない。
 - `mazegaki`: 公開用の統合ブランチ。Desktop のフォークはこのブランチの commit を参照する。
-- `pr/1-…`, `pr/2-…`: upstream に出す PR の単位のブランチ。それぞれ upstream の main から切る。
+- `pr/N-…`: upstream に出す PR の単位のブランチ。後の PR は前の PR に依存するので、積み重ねて切る。
+
+  | ブランチ | 分岐元 | 内容 |
+  |---|---|---|
+  | `pr/1-mazegaki-api` | upstream の main（`plans/mazegaki.md` の「前提」の revision） | API と読み表 |
+  | `pr/2-mazegaki-lookup` | `pr/1-mazegaki-api` | 辞書引きへの組み込み |
+  | `pr/3-mazegaki-ruby` | `pr/2-mazegaki-lookup` | ruby の前提の解消 |
+  | `pr/4-mazegaki-zenzai` | `pr/3-mazegaki-ruby` | Zenzai |
+
+  - 前の PR ブランチを修正したら、後のブランチを rebase する。
   - 次のフォーク専用ファイルは含めない: `CLAUDE.md`、`plans/`、`Tools/mazegaki-bench/`。
   - `Docs/Visions/mazegaki.md` は、PR に含めるか、Issue に貼るかを利用者が判断する。
+- フォーク専用ファイルの変更（ベンチの機能追加、計画の更新）は、`mazegaki` に直接コミットする。
+- **ベンチは `mazegaki` 上で実行する。** PR ブランチにはベンチが無いので、計測するときは次のようにする。
+  1. PR ブランチを `mazegaki` に merge する。
+  2. `mazegaki` 上でベンチを実行する。
+  3. 直す必要があれば PR ブランチで直し、もう一度 merge する。
 - コミットは 1 つの論点ごとに分ける。フォーク専用ファイルの変更と、ライブラリの変更を同じコミットに混ぜない
   （cherry-pick で PR ブランチに移せるようにするため）。
 - upstream に PR を作る・Issue を立てる・コメントする操作は、**必ず利用者の指示を待つ**。勝手に行わない。
