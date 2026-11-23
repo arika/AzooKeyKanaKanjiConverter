@@ -124,6 +124,14 @@ upstream 向けの説明は `Docs/Visions/mazegaki.md` にある。この文書�
 ### Step 0（2026-11-23、fea07f9、Apple M2 Pro / macOS 27.2.1 / Swift 6.4.2 / release / Zenzai オフ）
 
 データ:
+- 置き場所: 元データ（`kanjidic2.xml.gz`、`ipadic.maze.txt`）はリポジトリの 1 つ上のディレクトリに置く。
+  生成物（読み表・評価セット・計測結果）は `Tools/mazegaki-bench/data/` に置く。どちらもコミットしない
+  ```bash
+  # Tools/mazegaki-bench で実行
+  python3 -I scripts/kanjidic2tsv.py ../../../kanjidic2.xml.gz data/kanji_readings.tsv
+  python3 -I scripts/mazedic_stats.py ../../../ipadic.maze.txt data/kanji_readings.tsv
+  python3 -I scripts/make_mazedic_cases.py ../../../ipadic.maze.txt ../../../kanjidic2.xml.gz data/kanji_readings.tsv data/mazedic_cases.tsv
+  ```
 - 読み表: KANJIDIC2（date_of_creation 2026-11-23）→ `scripts/kanjidic2tsv.py` → 12,356 字
 - mazegaki-dic: 4d32219。読みの取りこぼし率（`scripts/mazedic_stats.py`）: 16,127 組（4,406 字）、出現回数で 10.3%。事前の分析と同じ
 - 評価セット: `scripts/make_mazedic_cases.py`（seed 20261123、3,000 件）
