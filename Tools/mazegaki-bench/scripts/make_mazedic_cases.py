@@ -69,7 +69,10 @@ strict = collections.defaultdict(set)
 for l in open(kd_tsv, encoding='utf-8'):
     if l.startswith('#') or '\t' not in l: continue
     k, v = l.rstrip('\n').split('\t')
-    for x in v.split(','): strict[k] |= variants(x)
+    # 表は送り仮名を `.` の後ろに持つ。表内・表外の判定は Step 0 と同じく語幹で行う
+    for x in v.split(','):
+        x = x.split('.')[0]
+        if x: strict[k] |= variants(x)
 
 EXCLUDE_POS = {'地名', '固有名詞', '名', '姓', '組織', '人名', '接尾一般', '接頭語', '助数詞'}
 def pos_group(p):
