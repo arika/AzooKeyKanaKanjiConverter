@@ -27,6 +27,9 @@ package final class DicdataStoreState {
     private(set) var memoryLOUDS: LOUDS?
     private var staticConversionCacheEligibility: Bool?
 
+    /// 交ぜ書き変換の読み表
+    let mazegakiReadingTableCache = MazegakiReadingTableCache()
+
     func updateUserDictionaryURL(_ newURL: URL, forceReload: Bool) {
         if self.userDictionaryURL != newURL || forceReload {
             self.userDictionaryURL = newURL

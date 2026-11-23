@@ -52,8 +52,9 @@ public struct ConvertRequestOptions: Sendable {
     ///   - specialCandidateProviders: 特殊変換を実施する変換関数を挿入します
     ///   - experimentalZenzaiPredictiveInput: Zenzai の予測入力フォールバックを有効にします（experimental）。
     ///   - typoCorrectionMode: 通常の変換リクエストで classic typo correction をどう扱うかを指定します。
+    ///   - mazegakiMode: 交ぜ書き変換（漢字とかなが混在した入力の変換）の設定です。詳しくは`ConvertRequestOptions.MazegakiMode`を参照してください。
     ///   - metadata: メタデータを指定します。詳しくは`ConvertRequestOptions.Metadata`を参照してください。
-    public init(N_best: Int = 10, requireJapanesePrediction: PredictionMode, requireEnglishPrediction: PredictionMode, keyboardLanguage: KeyboardLanguage, englishCandidateInRoman2KanaInput: Bool = false, fullWidthRomanCandidate: Bool = false, halfWidthKanaCandidate: Bool = false, learningType: LearningType, maxMemoryCount: Int = 65536, shouldResetMemory: Bool = false, memoryDirectoryURL: URL, sharedContainerURL: URL, textReplacer: TextReplacer, specialCandidateProviders: [any SpecialCandidateProvider]?, zenzaiMode: ZenzaiMode = .off, preloadDictionary: Bool = false, experimentalZenzaiPredictiveInput: Bool = false, typoCorrectionMode: TypoCorrectionMode = .automatic, metadata: ConvertRequestOptions.Metadata?) {
+    public init(N_best: Int = 10, requireJapanesePrediction: PredictionMode, requireEnglishPrediction: PredictionMode, keyboardLanguage: KeyboardLanguage, englishCandidateInRoman2KanaInput: Bool = false, fullWidthRomanCandidate: Bool = false, halfWidthKanaCandidate: Bool = false, learningType: LearningType, maxMemoryCount: Int = 65536, shouldResetMemory: Bool = false, memoryDirectoryURL: URL, sharedContainerURL: URL, textReplacer: TextReplacer, specialCandidateProviders: [any SpecialCandidateProvider]?, zenzaiMode: ZenzaiMode = .off, preloadDictionary: Bool = false, experimentalZenzaiPredictiveInput: Bool = false, typoCorrectionMode: TypoCorrectionMode = .automatic, mazegakiMode: MazegakiMode = .off, metadata: ConvertRequestOptions.Metadata?) {
         self.N_best = N_best
         self.requireJapanesePrediction = requireJapanesePrediction
         self.requireEnglishPrediction = requireEnglishPrediction
@@ -73,6 +74,7 @@ public struct ConvertRequestOptions: Sendable {
         self.preloadDictionary = preloadDictionary
         self.experimentalZenzaiPredictiveInput = experimentalZenzaiPredictiveInput
         self.typoCorrectionMode = typoCorrectionMode
+        self.mazegakiMode = mazegakiMode
 
         if shouldResetMemory {
             print("Warning: Passing `shouldResetMemory: true` in `ConvertRequestOptions` is deprecated. Use `KanaKanjiConverter.resetMemory` instead.")
@@ -103,6 +105,8 @@ public struct ConvertRequestOptions: Sendable {
     public var experimentalZenzaiPredictiveInput: Bool
     /// 通常の変換リクエストで classic typo correction をどう扱うかの設定。
     public var typoCorrectionMode: TypoCorrectionMode
+    /// 交ぜ書き変換の設定。
+    public var mazegakiMode: MazegakiMode
     // メタデータ
     public var metadata: Metadata?
 
@@ -261,5 +265,34 @@ public struct ConvertRequestOptions: Sendable {
         var requestRichCandidates: Bool
         var personalizationMode: PersonalizationMode?
         var versionDependentMode: ZenzaiVersionDependentMode
+    }
+
+    /// 交ぜ書き変換（`convertTarget`に漢字とかなが混在した入力の変換）の設定。
+    ///
+    /// 有効にすると、入力に含まれる漢字を読み表の読みに展開して辞書を引き、入力した漢字を保ったまま変換します。
+    /// 漢字の読み表はライブラリに同梱されないため、利用者が用意したファイルを指定します。形式は`Docs/converter_api.md`を参照してください。
+    public struct MazegakiMode: Sendable, Equatable, Hashable {
+        /// 交ぜ書き変換を無効にします（既定）。
+        public static let off = MazegakiMode(
+            enabled: false,
+            readingTableURL: URL(fileURLWithPath: ""),
+            maxReadingsPerKanji: 0
+        )
+
+        /// 交ぜ書き変換を有効にします。
+        /// - Parameters:
+        ///    - readingTableURL: 漢字の読み表のファイルの URL。読み込めない場合は`.off`と同じに動作します。
+        ///    - maxReadingsPerKanji: 読み表から使う読みの数の上限（1 字あたり、表の先頭から数えます）。促音化・連濁などライブラリが派生させる読みはこの数に含めません。負の値は`0`として扱います。(Default: 8)
+        public static func on(readingTableURL: URL, maxReadingsPerKanji: Int = 8) -> Self {
+            MazegakiMode(
+                enabled: true,
+                readingTableURL: readingTableURL,
+                maxReadingsPerKanji: max(0, maxReadingsPerKanji)
+            )
+        }
+
+        var enabled: Bool
+        var readingTableURL: URL
+        var maxReadingsPerKanji: Int
     }
 }
