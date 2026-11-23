@@ -35,6 +35,8 @@ public final class KanaKanjiConverter {
         var lastData: DicdataElement?
     }
     private static let defaultSessionID = ConversionSessionID(rawValue: "default")
+    /// 交ぜ書き変換で、入力と同じ文字列の候補を移す位置
+    static let mazegakiSameAsInputCandidateIndex = 5
 
     public init(dicdataStore: DicdataStore) {
         self.converter = .init(dicdataStore: dicdataStore)
@@ -1202,6 +1204,14 @@ public final class KanaKanjiConverter {
 
         result = self.candidates(consume result, matchingPrefix: prefixText)
         predictionResults = self.candidates(consume predictionResults, matchingPrefix: prefixText)
+        // 交ぜ書き変換では、入力と同じ文字列の候補（漢字を素通ししただけのもの）を下位へ回す
+        if self.isMazegakiInput(inputData) {
+            let sameAsInput = result.indices.filter { result[$0].text == inputData.convertTarget }
+            if !sameAsInput.isEmpty, sameAsInput.first! < Self.mazegakiSameAsInputCandidateIndex {
+                let moved = sameAsInput.reversed().map { result.remove(at: $0) }.reversed()
+                result.insert(contentsOf: moved, at: min(result.endIndex, Self.mazegakiSameAsInputCandidateIndex))
+            }
+        }
 
         result.mutatingForEach { item in
             self.prepareCandidateForResult(&item, prefixCandidate: prefixCandidate)
@@ -1337,12 +1347,37 @@ public final class KanaKanjiConverter {
             self.resetMemory()
         }
         self.dicdataStoreState.updateIfRequired(options: options)
+        self.updateMazegakiModeIfRequired(options.mazegakiMode)
         let needTypoCorrection = self.isClassicTypoCorrectionEnabled(options)
 
         guard let result = self.convertToLattice(inputData, N_best: options.N_best, zenzaiMode: options.zenzaiMode, needTypoCorrection: needTypoCorrection) else {
             return ConversionResult(mainResults: [], predictionResults: [], englishPredictionResults: [], firstClauseResults: [])
         }
         return self.processResult(inputData: inputData, result: result, options: options)
+    }
+
+    /// 交ぜ書き変換の設定を反映する。設定が変わった場合は、前の設定で作ったラティスなどのキャッシュを捨てる
+    private func updateMazegakiModeIfRequired(_ mode: ConvertRequestOptions.MazegakiMode) {
+        guard self.dicdataStoreState.updateMazegakiMode(mode) else {
+            return
+        }
+        self.sessions = self.sessions.mapValues { state in
+            var next = state
+            next.previousInputData = nil
+            next.zenzaiCache = nil
+            next.predictiveInputCache = nil
+            next.stablePredictionCandidateCache = nil
+            return next
+        }
+        self.purgeZenzaiMemoizationCache()
+    }
+
+    /// 交ぜ書き変換が有効で、入力に漢字が含まれるか
+    private func isMazegakiInput(_ inputData: ComposingText) -> Bool {
+        guard let table = self.dicdataStoreState.mazegakiReadingTable else {
+            return false
+        }
+        return inputData.convertTarget.contains { DicdataStore.isMazegakiConstrainedCharacter($0, table: table) }
     }
 
     private func isClassicTypoCorrectionEnabled(_ options: ConvertRequestOptions) -> Bool {
