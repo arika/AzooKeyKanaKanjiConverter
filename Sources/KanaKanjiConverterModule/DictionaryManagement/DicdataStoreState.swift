@@ -29,6 +29,20 @@ package final class DicdataStoreState {
 
     /// 交ぜ書き変換の読み表
     let mazegakiReadingTableCache = MazegakiReadingTableCache()
+    private(set) var mazegakiMode: ConvertRequestOptions.MazegakiMode = .off
+    /// 交ぜ書き変換に使う読み表。交ぜ書き変換が無効の場合と、読み表を読み込めない場合は`nil`
+    private(set) var mazegakiReadingTable: MazegakiReadingTable?
+
+    /// 交ぜ書き変換の設定を更新する。設定が変わった場合は`true`を返す
+    @discardableResult
+    func updateMazegakiMode(_ newMode: ConvertRequestOptions.MazegakiMode) -> Bool {
+        guard self.mazegakiMode != newMode else {
+            return false
+        }
+        self.mazegakiMode = newMode
+        self.mazegakiReadingTable = self.mazegakiReadingTableCache.table(for: newMode)
+        return true
+    }
 
     func updateUserDictionaryURL(_ newURL: URL, forceReload: Bool) {
         if self.userDictionaryURL != newURL || forceReload {
