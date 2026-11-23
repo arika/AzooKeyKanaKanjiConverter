@@ -13,6 +13,9 @@ import KanaKanjiConverterModuleWithDefaultDictionary
 //   --cap N             --expand 時に試す読み組合せの上限（既定 32）
 //   --quiet             候補一覧を出さず結果行だけ表示
 //   --table PATH        入力をキー列とみなし、カスタム入力テーブル(TSV)経由で変換（漢直テーブルの動作確認用）
+//   --cases PATH        テストケースを TSV から読む（カテゴリ<TAB>入力<TAB>正解1,正解2,…[<TAB>任意]、# 行は無視）。
+//                       正解が複数あるときは、いちばん上位のものの順位を採る
+//   --out PATH          ケースごとの結果を TSV に書く（ステップ間の差分を取るため）
 //   入力                 指定がなければ組み込みケースを実行
 //
 // - debug ビルドではライブラリの debug ログが大量に出るので release 推奨
@@ -26,6 +29,23 @@ struct TestCase {
     var category: String
     var input: String
     var expected: String?
+    /// expected 以外の正解（1 つのキーに正解が複数ある評価セット用）
+    var alternatives: [String] = []
+    var answers: [String] { (expected.map { [$0] } ?? []) + alternatives }
+}
+
+func loadCases(_ path: String) -> [TestCase] {
+    guard let text = try? String(contentsOfFile: path, encoding: .utf8) else {
+        print("テストケースを読めません: \(path)")
+        exit(1)
+    }
+    return text.split(separator: "\n").compactMap { line -> TestCase? in
+        if line.hasPrefix("#") { return nil }
+        let cols = line.split(separator: "\t", omittingEmptySubsequences: false).map(String.init)
+        guard cols.count >= 3 else { return nil }
+        let answers = cols[2].split(separator: ",").map(String.init)
+        return TestCase(category: cols[0], input: cols[1], expected: answers.first, alternatives: Array(answers.dropFirst()))
+    }
 }
 
 let builtinCases: [TestCase] = [
@@ -105,6 +125,8 @@ var expandMode = false
 var comboCap = 32
 var quiet = false
 var tablePath: String? = nil   // 指定時: 入力をキー列とみなし、カスタム入力テーブル(TSV)経由で ComposingText を作る
+var casesPath: String? = nil
+var outPath: String? = nil
 var inputArgs: [String] = []
 do {
     var it = CommandLine.arguments.dropFirst().makeIterator()
@@ -117,6 +139,8 @@ do {
         case "--cap": comboCap = Int(it.next() ?? "") ?? comboCap
         case "--quiet": quiet = true
         case "--table": tablePath = it.next()
+        case "--cases": casesPath = it.next()
+        case "--out": outPath = it.next()
         default: inputArgs.append(a)
         }
     }
@@ -193,6 +217,17 @@ func preservesKanji(input: String, candidate: String) -> Bool {
 func coversWholeInput(_ c: Candidate, _ text: ComposingText) -> Bool {
     c.composingCount == .inputCount(text.input.count)
         || c.composingCount == .surfaceCount(text.convertTarget.count)
+}
+
+/// 候補が覆う入力の先頭部分（ベンチの入力は .direct で 1 文字 = 1 入力要素なので、入力数と表層の文字数は等しい）
+func coveredPrefix(_ c: Candidate, _ input: String) -> String {
+    func count(_ cc: ComposingCount) -> Int {
+        switch cc {
+        case .inputCount(let n), .surfaceCount(let n): n
+        case .composite(let l, let r): count(l) + count(r)
+        }
+    }
+    return String(input.prefix(count(c.composingCount)))
 }
 
 func ms(_ d: Duration) -> Double {
@@ -418,14 +453,20 @@ struct Outcome {
     var rank: Int?
     var latency: Double
     var combos: Int
+    var kanjiLost: Bool      // 上位 showCount 件に、入力漢字が消えた候補がある
+    var top1: String
 }
 
 let showCount = 8
 let clock = ContinuousClock()
 
-let cases = inputArgs.isEmpty
-    ? builtinCases
-    : inputArgs.map { TestCase(category: "任意", input: $0, expected: nil) }
+let cases = if let casesPath {
+    loadCases(casesPath)
+} else if inputArgs.isEmpty {
+    builtinCases
+} else {
+    inputArgs.map { TestCase(category: "任意", input: $0, expected: nil) }
+}
 
 // カスタム入力テーブル（漢直テーブル想定）の動作確認モード
 if let tablePath {
@@ -494,7 +535,7 @@ for tc in cases {
         candidates = result.mainResults
     }
 
-    let rank = tc.expected.flatMap { e in candidates.firstIndex { $0.text == e }.map { $0 + 1 } }
+    let rank = tc.answers.compactMap { e in candidates.firstIndex { $0.text == e }.map { $0 + 1 } }.min()
     let mark: String
     switch rank {
     case .some(1): mark = "◎ 1位"
@@ -504,7 +545,7 @@ for tc in cases {
     }
 
     var header = pad(tc.input, 26)
-    if let e = tc.expected { header += "→ \(pad(e, 22)) \(pad(mark, 16))" }
+    if tc.expected != nil { header += "→ \(pad(tc.answers.joined(separator: ","), 22)) \(pad(mark, 16))" }
     header += String(format: " %6.1fms", latency) + note
     print(header)
 
@@ -512,14 +553,17 @@ for tc in cases {
         let listed = candidates.prefix(showCount).enumerated().map { i, c -> String in
             var s = "\(i + 1).\(c.text)"
             if !expandMode, !coversWholeInput(c, literalText) { s += "[部分]" }
-            if !preservesKanji(input: tc.input, candidate: c.text) { s += "[漢字消失]" }
-            if c.text == tc.expected { s = "【\(s)】" }
+            if !preservesKanji(input: coveredPrefix(c, tc.input), candidate: c.text) { s += "[漢字消失]" }
+            if tc.answers.contains(c.text) { s = "【\(s)】" }
             return s
         }
         print("    " + listed.joined(separator: "  "))
     }
 
-    outcomes.append(.init(testCase: tc, rank: rank, latency: latency, combos: combos))
+    // 部分候補（入力の先頭だけを変換した候補）は、その候補が覆う範囲の漢字だけを見る
+    let kanjiLost = candidates.prefix(showCount).contains { !preservesKanji(input: coveredPrefix($0, tc.input), candidate: $0.text) }
+    outcomes.append(.init(testCase: tc, rank: rank, latency: latency, combos: combos,
+                          kanjiLost: kanjiLost, top1: candidates.first?.text ?? ""))
 }
 
 // MARK: - 集計
@@ -541,8 +585,23 @@ if !scored.isEmpty {
         let worst = os.map(\.latency).max() ?? 0
         print("\(pad(cat, 12)) \(String(format: "%4d %4d %6d %5d %5d %8.1f %8.1f", os.count, top1, top5, found, os.count - found, avg, worst))")
     }
+    let lost = scored.filter(\.kanjiLost)
+    print("\n入力漢字の消失（上位\(showCount)件に含むケース）: \(lost.count)件"
+          + (lost.isEmpty ? "" : "  例: " + lost.prefix(20).map(\.testCase.input).joined(separator: ", ")))
     let misses = scored.filter { $0.rank == nil }
     if !misses.isEmpty {
-        print("\n圏外: " + misses.map { "\($0.testCase.input)→\($0.testCase.expected!)" }.joined(separator: ", "))
+        let shown = misses.prefix(60).map { "\($0.testCase.input)→\($0.testCase.expected!)" }.joined(separator: ", ")
+        print("\n圏外: " + shown + (misses.count > 60 ? " ほか\(misses.count - 60)件" : ""))
     }
+}
+
+if let outPath {
+    var lines = ["# カテゴリ\t入力\t正解\t順位\t1位\tms\t漢字消失"]
+    for o in outcomes {
+        lines.append([o.testCase.category, o.testCase.input, o.testCase.answers.joined(separator: ","),
+                      o.rank.map(String.init) ?? "-", o.top1, String(format: "%.2f", o.latency),
+                      o.kanjiLost ? "1" : "0"].joined(separator: "\t"))
+    }
+    try lines.joined(separator: "\n").appending("\n").write(toFile: outPath, atomically: true, encoding: .utf8)
+    print("結果を書き出しました: \(outPath)")
 }
