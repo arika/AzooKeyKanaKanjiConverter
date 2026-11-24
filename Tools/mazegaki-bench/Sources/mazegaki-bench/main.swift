@@ -11,6 +11,7 @@ import KanaKanjiConverterModuleWithDefaultDictionary
 //   --limit N           Zenzai の inferenceLimit（既定 1）
 //   --expand            「漢字を開く」方式で変換する（既定は入力そのまま＝漢字を素通し）
 //   --cap N             --expand 時に試す読み組合せの上限（既定 32）
+//   --batch             1 文字ずつではなく、入力全体を一度に入れて 1 回だけ変換する（打鍵ごとの引き継ぎの影響を切り分けるため）
 //   --all-keystrokes    1 文字ずつ入力する方式で、最後の 1 打鍵ではなく、すべての打鍵のうち最大の時間を記録する
 //   --prediction M      日本語の予測変換の設定（autoMix〔既定〕/ manualMix / disabled）。分析用
 //   --mazegaki          エンジン組み込み版（ConvertRequestOptions.mazegakiMode）で変換する。入力の仕方は素通しと同じ
@@ -134,6 +135,7 @@ var expandMode = false
 var mazegakiMode = false
 var predictionMode = ConvertRequestOptions.PredictionMode.autoMix
 var allKeystrokes = false
+var batchInput = false
 var comboCap = 32
 enum ReadingRules: String { case legacy, library }
 var readingRules = ReadingRules.legacy
@@ -154,6 +156,7 @@ do {
         case "--expand": expandMode = true
         case "--mazegaki": mazegakiMode = true
         case "--all-keystrokes": allKeystrokes = true
+        case "--batch": batchInput = true
         case "--prediction":
             switch it.next() {
             case "autoMix": predictionMode = .autoMix
@@ -642,8 +645,8 @@ for tc in cases {
     } else {
         // 1 文字ずつ入力（漢直 IM で打鍵ごとに変換を回す想定）。最終打鍵の時間を記録
         var result: ConversionResult!
-        for ch in tc.input {
-            literalText.insertAtCursorPosition(String(ch), inputStyle: .direct)
+        for ch in (batchInput ? [tc.input] : tc.input.map(String.init)) {
+            literalText.insertAtCursorPosition(ch, inputStyle: .direct)
             let elapsed = clock.measure { result = converter.requestCandidates(literalText, options: options) }
             latency = allKeystrokes ? max(latency, ms(elapsed)) : ms(elapsed)
         }
