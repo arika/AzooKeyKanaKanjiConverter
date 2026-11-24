@@ -1188,7 +1188,7 @@ public final class KanaKanjiConverter {
 
         var result = consume fullCandidates
         // 3番目までに最低でも1つ、（誤り訂正ではなく）入力に完全一致する候補が入るようにする
-        let checkRuby: (Candidate) -> Bool = {$0.data.reduce(into: "") {$0 += $1.ruby} == inputData.convertTarget.toKatakana()}
+        let checkRuby: (Candidate) -> Bool = { self.isExactMatchCandidate($0, convertTarget: inputData.convertTarget) }
         if !result.prefix(3).contains(where: checkRuby) {
             if let candidateIndex = result.dropFirst(3).firstIndex(where: checkRuby) {
                 // 3番目以降にある場合は順位を入れ替える
@@ -1384,6 +1384,11 @@ public final class KanaKanjiConverter {
             }
         }
         return count(candidate.composingCount)
+    }
+
+    /// 候補が、誤り訂正ではなく入力に完全一致するか（候補の ruby が入力を読んだものか）
+    package func isExactMatchCandidate(_ candidate: Candidate, convertTarget: String) -> Bool {
+        candidate.data.reduce(into: "") { $0 += $1.ruby } == convertTarget.toKatakana()
     }
 
     /// 交ぜ書き変換が有効で、入力に漢字が含まれるか
