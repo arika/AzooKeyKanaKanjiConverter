@@ -11,6 +11,8 @@ import KanaKanjiConverterModuleWithDefaultDictionary
 //   --limit N           Zenzai の inferenceLimit（既定 1）
 //   --expand            「漢字を開く」方式で変換する（既定は入力そのまま＝漢字を素通し）
 //   --cap N             --expand 時に試す読み組合せの上限（既定 32）
+//   --mazegaki          エンジン組み込み版（ConvertRequestOptions.mazegakiMode）で変換する。入力の仕方は素通しと同じ
+//                       （1 文字ずつ入力して最後の 1 打鍵の時間を計る）。読み表は --reading-table、上限は --max-readings
 //   --reading-table P   読み表のパス（既定 data/kanji_readings.tsv）
 //   --readings R        --expand 時の読みの派生規則。legacy（既定。Step 0 と同じ: 語幹・促音化・連濁、上限なし）
 //                       または library（ライブラリと同じ: 上限つきの語幹・促音化・連濁・連用形・連用形の連濁）
@@ -127,6 +129,7 @@ var useZenzai = false
 var modelPath = "models/zenz-v3.1-small-Q5_K_M.gguf"
 var inferenceLimit = 1
 var expandMode = false
+var mazegakiMode = false
 var comboCap = 32
 enum ReadingRules: String { case legacy, library }
 var readingRules = ReadingRules.legacy
@@ -145,6 +148,7 @@ do {
         case "--model": modelPath = it.next() ?? modelPath; useZenzai = true
         case "--limit": inferenceLimit = Int(it.next() ?? "") ?? inferenceLimit
         case "--expand": expandMode = true
+        case "--mazegaki": mazegakiMode = true
         case "--cap": comboCap = Int(it.next() ?? "") ?? comboCap
         case "--readings":
             guard let r = it.next().flatMap(ReadingRules.init(rawValue:)) else { print("--readings は legacy か library"); exit(1) }
@@ -175,7 +179,7 @@ if useZenzai {
 } else {
     zenzaiMode = .off
 }
-print("Zenzai: \(useZenzai ? "ON (inferenceLimit=\(inferenceLimit))" : "OFF")  方式: \(expandMode ? "漢字を開く (cap=\(comboCap), readings=\(readingRules.rawValue)\(readingRules == .library ? " max=\(maxReadingsPerKanji)" : ""), table=\(readingTablePath))" : "素通し")")
+print("Zenzai: \(useZenzai ? "ON (inferenceLimit=\(inferenceLimit))" : "OFF")  方式: \(mazegakiMode ? "エンジン組み込み (max=\(maxReadingsPerKanji), table=\(readingTablePath))" : expandMode ? "漢字を開く (cap=\(comboCap), readings=\(readingRules.rawValue)\(readingRules == .library ? " max=\(maxReadingsPerKanji)" : ""), table=\(readingTablePath))" : "素通し")")
 
 let converter = KanaKanjiConverter.withDefaultDictionary()
 
@@ -193,8 +197,15 @@ let options = ConvertRequestOptions(
     textReplacer: .withDefaultEmojiDictionary(),
     specialCandidateProviders: KanaKanjiConverter.defaultSpecialCandidateProviders,
     zenzaiMode: zenzaiMode,
+    mazegakiMode: mazegakiMode
+        ? .on(readingTableURL: URL(fileURLWithPath: readingTablePath), maxReadingsPerKanji: maxReadingsPerKanji)
+        : .off,
     metadata: .init(versionString: "mazegaki-test")
 )
+if mazegakiMode, !FileManager.default.fileExists(atPath: readingTablePath) {
+    print("\(readingTablePath) が読めません")
+    exit(1)
+}
 
 // MARK: - 文字種ヘルパ
 
