@@ -74,4 +74,56 @@ final class MazegakiZenzaiCacheTests: XCTestCase {
         )
         XCTAssertEqual(mazegakiCache.getNewConstraint(for: self.composingText("破たんし")).constraint, [])
     }
+
+    // MARK: - 案B: モデルに渡す入力
+
+    func testEvaluationInputIsCandidateRubyForMazegakiInput() {
+        let result = Kana2Kanji.zenzaiEvaluationInput(
+            candidate: self.candidate([("破綻", "ハタン")]),
+            inputData: self.composingText("破たん"),
+            cursorPosition: nil,
+            constraint: .init([]),
+            mazegakiTable: self.table
+        )
+        XCTAssertEqual(result.input, "ハタン")
+    }
+
+    func testEvaluationInputConvertsFixedPrefixToRubyCount() {
+        // 取ひき（表層 3 文字）= 取引（ruby 4 文字）
+        let fixed = Array("取引".utf8)
+        let constraint = Kana2Kanji.PrefixConstraint(fixed, fixedPrefix: .init(byteCount: fixed.count, rubyCount: 3))
+        let result = Kana2Kanji.zenzaiEvaluationInput(
+            candidate: self.candidate([("取引", "トリヒキ"), ("を", "ヲ")]),
+            inputData: self.composingText("取ひきを"),
+            cursorPosition: nil,
+            constraint: constraint,
+            mazegakiTable: self.table
+        )
+        XCTAssertEqual(result.input, "トリヒキヲ")
+        XCTAssertEqual(result.constraint.fixedPrefix, .init(byteCount: fixed.count, rubyCount: 4))
+        XCTAssertEqual(result.constraint.constraint, fixed)
+    }
+
+    func testEvaluationInputIsUnchangedWithoutMazegaki() {
+        let constraint = Kana2Kanji.PrefixConstraint([])
+        for (input, table) in [("はたん", self.table), ("破たん", nil)] as [(String, MazegakiReadingTable?)] {
+            let result = Kana2Kanji.zenzaiEvaluationInput(
+                candidate: self.candidate([("破綻", "ハタン")]),
+                inputData: self.composingText(input),
+                cursorPosition: nil,
+                constraint: constraint,
+                mazegakiTable: table
+            )
+            XCTAssertEqual(result.input, input)
+        }
+        // カーソルが途中にある場合も従来どおり
+        let result = Kana2Kanji.zenzaiEvaluationInput(
+            candidate: self.candidate([("破綻", "ハタン")]),
+            inputData: self.composingText("破たん"),
+            cursorPosition: 1,
+            constraint: constraint,
+            mazegakiTable: self.table
+        )
+        XCTAssertEqual(result.input, "破たん")
+    }
 }

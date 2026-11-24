@@ -470,12 +470,19 @@ extension Kana2Kanji {
                         )
                     )
                 }
+                let evaluation = Self.zenzaiEvaluationInput(
+                    candidate: candidate,
+                    inputData: inputData,
+                    cursorPosition: zenzInputCursorPosition,
+                    constraint: constraint,
+                    mazegakiTable: dicdataStoreState.mazegakiReadingTable
+                )
                 let reviewResult = zenz.candidateEvaluate(
-                    convertTarget: inputData.convertTarget,
+                    convertTarget: evaluation.input,
                     convertTargetCursorPosition: zenzInputCursorPosition,
                     candidates: [candidate],
                     requestRichCandidates: requestRichCandidates,
-                    prefixConstraint: constraint,
+                    prefixConstraint: evaluation.constraint,
                     personalizationMode: personalizationMode,
                     versionDependentConfig: versionDependentConfig,
                     memoizationCache: zenzaiMemoizationCache,
@@ -589,6 +596,39 @@ extension Kana2Kanji {
         case `return`(constraint: PrefixConstraint, alternativeConstraints: [CandidateEvaluationResult.AlternativeConstraint], satisfied: Bool)
         case `continue`
         case `retry`(candidateIndex: Int)
+    }
+
+    /// モデルに評価させる入力（読み）と制約。
+    ///
+    /// 交ぜ書き変換の入力では、入力に漢字が混ざったまま渡すと、モデルは漢字の読みを知らないので、
+    /// かなの部分だけで判断してしまう（けん引 → 検 + 引）。そのため、評価する候補の ruby を入力として渡す（ケンイン）。
+    /// 固定部分の長さは、入力（表層）の文字数から、候補の ruby の文字数に読み替える。
+    /// 入力の途中にカーソルがある場合は、右側の文脈との対応を取らないので、従来どおり入力をそのまま渡す。
+    static func zenzaiEvaluationInput(
+        candidate: Candidate,
+        inputData: ComposingText,
+        cursorPosition: Int?,
+        constraint: PrefixConstraint,
+        mazegakiTable: MazegakiReadingTable?
+    ) -> (input: String, constraint: PrefixConstraint) {
+        guard let mazegakiTable, cursorPosition == nil,
+              inputData.convertTarget.contains(where: { DicdataStore.isMazegakiConstrainedCharacter($0, table: mazegakiTable) }) else {
+            return (inputData.convertTarget, constraint)
+        }
+        var evaluationConstraint = constraint
+        if let fixedPrefix = constraint.fixedPrefix {
+            // 固定された表記を覆う語の ruby の長さ。語の境目で表記が切れない場合は固定部分を使わない
+            var byteCount = 0
+            var rubyCount = 0
+            for item in candidate.data where byteCount < fixedPrefix.byteCount {
+                byteCount += item.word.utf8.count
+                rubyCount += item.ruby.count
+            }
+            evaluationConstraint.fixedPrefix = byteCount == fixedPrefix.byteCount
+                ? .init(byteCount: fixedPrefix.byteCount, rubyCount: rubyCount)
+                : nil
+        }
+        return (candidate.data.map(\.ruby).joined(), evaluationConstraint)
     }
 
     static func zenzaiLatticeInputData(for inputData: ComposingText) -> ComposingText {
