@@ -11,6 +11,7 @@ import KanaKanjiConverterModuleWithDefaultDictionary
 //   --limit N           Zenzai の inferenceLimit（既定 1）
 //   --expand            「漢字を開く」方式で変換する（既定は入力そのまま＝漢字を素通し）
 //   --cap N             --expand 時に試す読み組合せの上限（既定 32）
+//   --all-keystrokes    1 文字ずつ入力する方式で、最後の 1 打鍵ではなく、すべての打鍵のうち最大の時間を記録する
 //   --prediction M      日本語の予測変換の設定（autoMix〔既定〕/ manualMix / disabled）。分析用
 //   --mazegaki          エンジン組み込み版（ConvertRequestOptions.mazegakiMode）で変換する。入力の仕方は素通しと同じ
 //                       （1 文字ずつ入力して最後の 1 打鍵の時間を計る）。読み表は --reading-table、上限は --max-readings
@@ -132,6 +133,7 @@ var inferenceLimit = 1
 var expandMode = false
 var mazegakiMode = false
 var predictionMode = ConvertRequestOptions.PredictionMode.autoMix
+var allKeystrokes = false
 var comboCap = 32
 enum ReadingRules: String { case legacy, library }
 var readingRules = ReadingRules.legacy
@@ -151,6 +153,7 @@ do {
         case "--limit": inferenceLimit = Int(it.next() ?? "") ?? inferenceLimit
         case "--expand": expandMode = true
         case "--mazegaki": mazegakiMode = true
+        case "--all-keystrokes": allKeystrokes = true
         case "--prediction":
             switch it.next() {
             case "autoMix": predictionMode = .autoMix
@@ -642,7 +645,7 @@ for tc in cases {
         for ch in tc.input {
             literalText.insertAtCursorPosition(String(ch), inputStyle: .direct)
             let elapsed = clock.measure { result = converter.requestCandidates(literalText, options: options) }
-            latency = ms(elapsed)
+            latency = allKeystrokes ? max(latency, ms(elapsed)) : ms(elapsed)
         }
         converter.stopComposition()
         candidates = result.mainResults
