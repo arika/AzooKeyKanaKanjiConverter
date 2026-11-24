@@ -75,6 +75,33 @@ final class MazegakiZenzaiCacheTests: XCTestCase {
         XCTAssertEqual(mazegakiCache.getNewConstraint(for: self.composingText("破たんし")).constraint, [])
     }
 
+    func testCarriedConstraintIsDroppedWhenInputKanjiChange() {
+        // 「ひ」を「日」と変換した後に入力漢字「告」を足した。かなに対して認めた「日」を引き継ぐと「日告」に縛られる
+        let table = MazegakiReadingTable(parsing: "告\tコク\n", maxReadingsPerKanji: 8)
+        let cache = Kana2Kanji.ZenzaiCache(
+            self.composingText("ひ"),
+            constraint: .init(Array("日".utf8)),
+            satisfyingCandidate: self.candidate([("日", "ヒ")])
+        )
+        XCTAssertEqual(cache.getNewConstraint(for: self.composingText("ひ告"), mazegakiTable: table).constraint, [])
+        // 入力漢字を消した場合も引き継がない
+        let kanjiCache = Kana2Kanji.ZenzaiCache(
+            self.composingText("取破"),
+            constraint: .init(Array("取破".utf8)),
+            satisfyingCandidate: self.candidate([("取", "ト"), ("破", "ハ")])
+        )
+        XCTAssertEqual(kanjiCache.getNewConstraint(for: self.composingText("取"), mazegakiTable: self.table).constraint, [])
+    }
+
+    func testFallbackConstraintKeepsOnlyFixedPrefix() {
+        // 引き継いだ制約は外し、利用者が確定した固定部分だけを残す
+        XCTAssertEqual(Kana2Kanji.mazegakiFallbackConstraint(from: .init(Array("半".utf8))), .init([]))
+        let fixed = Array("破綻".utf8)
+        let fixedPrefix = Kana2Kanji.PrefixConstraint.FixedPrefix(byteCount: fixed.count, rubyCount: 3)
+        let constraint = Kana2Kanji.PrefixConstraint(Array("破綻を".utf8), fixedPrefix: fixedPrefix)
+        XCTAssertEqual(Kana2Kanji.mazegakiFallbackConstraint(from: constraint), .init(fixed, fixedPrefix: fixedPrefix))
+    }
+
     // MARK: - 案B: モデルに渡す入力
 
     func testEvaluationInputIsCandidateRubyForMazegakiInput() {

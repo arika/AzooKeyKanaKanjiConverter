@@ -149,6 +149,13 @@ extension Kana2Kanji {
 
         /// モデルの評価で置き換わりうる制約。
         private func getReplaceableConstraint(for newInputData: ComposingText, mazegakiTable: MazegakiReadingTable?) -> PrefixConstraint {
+            if let table = Self.mazegakiTable(mazegakiTable, for: newInputData),
+               newInputData.convertTarget.filter({ DicdataStore.isMazegakiConstrainedCharacter($0, table: table) })
+                != self.inputData.convertTarget.filter({ DicdataStore.isMazegakiConstrainedCharacter($0, table: table) }) {
+                // 交ぜ書き変換: 入力漢字が変わった打鍵では、前の入力に対してモデルが認めた表記を引き継がない。
+                // 入力漢字を打つ前のかな（ひ）に対する表記（日）は、入力漢字と組み合わせると素通しの候補（日告）になりやすい。
+                return PrefixConstraint([])
+            }
             if let satisfyingCandidate, let table = Self.mazegakiTable(mazegakiTable, for: newInputData) {
                 // 交ぜ書き変換: 語ごとに、表層の先頭のどれだけを覆うかを読み表で突き合わせて求める
                 var surface = Array(newInputData.convertTarget.toKatakana())[...]
@@ -322,8 +329,40 @@ extension Kana2Kanji {
                 lattice: latticeIsComplete ? lattice : nil
             )
         }
+        // 交ぜ書き変換の入力で、モデルが入力漢字を残せない表記を求めて評価が終わった場合、最初のドラフトを先頭に戻す。
+        // 最後に評価した候補は、モデルの訂正に合わせた結果入力漢字を素通しにしただけのもの（あん座）になりやすい。
+        let isMazegakiInput = dicdataStoreState.mazegakiReadingTable.map { table in
+            latticeInputData.convertTarget.contains { DicdataStore.isMazegakiConstrainedCharacter($0, table: table) }
+        } ?? false
+        var restoresFirstDraft = false
         defer {
+            if restoresFirstDraft, insertedCandidates.count > 1 {
+                insertedCandidates.insert(insertedCandidates.removeLast(), at: 0)
+            }
             eosNode.prevs = insertedCandidates.map(\.0)
+        }
+        // 交ぜ書き変換の入力で評価が失敗した場合の先頭: 前の打鍵から引き継いだ制約（固定部分を除く）を外したドラフト。
+        // 引き継いだ制約は、入力漢字を打つ前のかなに対してモデルが認めた表記（はん → 半）なので、入力漢字と合わないことがある（半濫）。
+        let initialConstraint = constraint
+        func restoreDraftWithoutCarriedConstraint() {
+            guard isMazegakiInput else {
+                return
+            }
+            restoresFirstDraft = true
+            let base = Self.mazegakiFallbackConstraint(from: initialConstraint)
+            guard base.constraint != initialConstraint.constraint else {
+                return
+            }
+            let preprocessed: Lattice? = latticeIsComplete && !lattice.isEmpty ? lattice : nil
+            preprocessed?.resetNodeStates()
+            let draft = base.isEmpty
+                ? self.kana2lattice_all(latticeInputData, N_best: 1, needTypoCorrection: false, preprocessedLattice: preprocessed, dicdataStoreState: dicdataStoreState)
+                : self.kana2lattice_all_with_prefix_constraint(latticeInputData, N_best: 1, constraint: base, preprocessedLattice: preprocessed, dicdataStoreState: dicdataStoreState)
+            let candidates = draft.result.getCandidateData().map(self.processClauseCandidate)
+            if let (index, candidate) = candidates.enumerated().max(by: { $0.1.value < $1.1.value }) {
+                // defer で末尾の要素を先頭に移すので、末尾に置く
+                insertedCandidates.append((draft.result.prevs[index], candidate))
+            }
         }
         var inferenceLimit = inferenceLimit
         var draftIteration = 0
@@ -436,6 +475,7 @@ extension Kana2Kanji {
             draftIteration += 1
             guard var (index, candidate) = best else {
                 debug("best was not found!")
+                restoreDraftWithoutCarriedConstraint()
                 // Emptyの場合
                 // 制約が満たせない場合は無視する
                 return (eosNode, lattice, makeCache(constraint: PrefixConstraint([]), satisfyingCandidate: nil))
@@ -576,6 +616,7 @@ extension Kana2Kanji {
                             )
                         )
                     } else {
+                        restoreDraftWithoutCarriedConstraint()
                         return (eosNode, lattice, makeCache(constraint: constraint, satisfyingCandidate: nil))
                     }
                 case .continue:
@@ -629,6 +670,15 @@ extension Kana2Kanji {
                 : nil
         }
         return (candidate.data.map(\.ruby).joined(), evaluationConstraint)
+    }
+
+    /// 交ぜ書き変換の入力で評価が失敗した場合に、先頭のドラフトを作り直すときの制約。
+    /// 前の打鍵から引き継いだ制約は外し、利用者が確定した固定部分だけを残す。
+    static func mazegakiFallbackConstraint(from constraint: PrefixConstraint) -> PrefixConstraint {
+        guard let fixedPrefix = constraint.fixedPrefix else {
+            return PrefixConstraint([])
+        }
+        return PrefixConstraint(Array(constraint.constraint.prefix(fixedPrefix.byteCount)), fixedPrefix: fixedPrefix)
     }
 
     static func zenzaiLatticeInputData(for inputData: ComposingText) -> ComposingText {
