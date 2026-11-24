@@ -1,0 +1,77 @@
+@testable import KanaKanjiConverterModule
+import XCTest
+
+/// E9: Zenzai の制約の計算で、交ぜ書きの候補（ruby が入力の読み）を入力の位置に対応づける
+final class MazegakiZenzaiCacheTests: XCTestCase {
+    private let table = MazegakiReadingTable(parsing: "破\tハ,ヤブ.ル\n取\tシュ,ト.ル\n引\tイン,ヒ.ク\n", maxReadingsPerKanji: 8)
+
+    private func composingText(_ s: String) -> ComposingText {
+        var t = ComposingText()
+        t.insertAtCursorPosition(s, inputStyle: .direct)
+        return t
+    }
+
+    private func candidate(_ items: [(String, String)]) -> Candidate {
+        Candidate(
+            text: items.map(\.0).joined(),
+            value: -10,
+            composingCount: .surfaceCount(items.map(\.1.count).reduce(0, +)),
+            lastMid: MIDData.一般.mid,
+            data: items.map { DicdataElement(word: $0.0, ruby: $0.1, cid: CIDData.一般名詞.cid, mid: MIDData.一般.mid, value: -10) }
+        )
+    }
+
+    func testReplaceableConstraintFollowsMazegakiCandidate() {
+        // 「破たん」を「破綻」(ハタン) と変換した後に「し」を足した
+        let cache = Kana2Kanji.ZenzaiCache(
+            self.composingText("破たん"),
+            constraint: .init([]),
+            satisfyingCandidate: self.candidate([("破綻", "ハタン")])
+        )
+        let constraint = cache.getNewConstraint(for: self.composingText("破たんし"), mazegakiTable: self.table)
+        XCTAssertEqual(constraint.constraint, Array("破綻".utf8))
+    }
+
+    func testReplaceableConstraintWithSeveralWords() {
+        // 取ひき + を → 取引(トリヒキ) を(ヲ)。取 = トリ、引 = ヒ
+        let cache = Kana2Kanji.ZenzaiCache(
+            self.composingText("取ひきを"),
+            constraint: .init([]),
+            satisfyingCandidate: self.candidate([("取引", "トリヒキ"), ("を", "ヲ")])
+        )
+        let constraint = cache.getNewConstraint(for: self.composingText("取ひきをし"), mazegakiTable: self.table)
+        XCTAssertEqual(constraint.constraint, Array("取引を".utf8))
+    }
+
+    func testPrefixCandidateRemainsForMazegakiInput() {
+        let prefix = self.candidate([("破綻", "ハタン")])
+        let cache = Kana2Kanji.ZenzaiCache(
+            self.composingText("破たん"),
+            constraint: .init([]),
+            satisfyingCandidate: prefix,
+            prefixCandidate: prefix
+        )
+        let newInput = self.composingText("破たんし")
+        XCTAssertNotNil(cache.prefixCandidate(remainingIn: newInput, mazegakiTable: self.table))
+        let constraint = cache.getNewConstraint(for: newInput, mazegakiTable: self.table)
+        // 固定部分の長さは、入力の先頭のうち、その表記が覆う文字数（破たん = 3）
+        XCTAssertEqual(constraint.fixedPrefix, .init(byteCount: Array("破綻".utf8).count, rubyCount: 3))
+    }
+
+    func testWithoutMazegakiTableBehavesAsBefore() {
+        // かなの入力では従来どおり ruby の一致で対応づける
+        let cache = Kana2Kanji.ZenzaiCache(
+            self.composingText("はたん"),
+            constraint: .init([]),
+            satisfyingCandidate: self.candidate([("破綻", "ハタン")])
+        )
+        XCTAssertEqual(cache.getNewConstraint(for: self.composingText("はたんし")).constraint, Array("破綻".utf8))
+        // 読み表がなければ、入力漢字を読みとして扱わない
+        let mazegakiCache = Kana2Kanji.ZenzaiCache(
+            self.composingText("破たん"),
+            constraint: .init([]),
+            satisfyingCandidate: self.candidate([("破綻", "ハタン")])
+        )
+        XCTAssertEqual(mazegakiCache.getNewConstraint(for: self.composingText("破たんし")).constraint, [])
+    }
+}
