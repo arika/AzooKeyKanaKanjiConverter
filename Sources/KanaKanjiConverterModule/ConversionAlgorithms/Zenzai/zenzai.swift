@@ -54,14 +54,15 @@ extension Kana2Kanji {
         func updatingResult(
             for newInputData: ComposingText,
             constraint: PrefixConstraint,
-            satisfyingCandidate: Candidate
+            satisfyingCandidate: Candidate,
+            mazegakiTable: MazegakiReadingTable? = nil
         ) -> ZenzaiCache {
             ZenzaiCache(
                 newInputData,
                 constraint: constraint,
                 satisfyingCandidate: satisfyingCandidate,
                 evaluatedSatisfyingCandidate: satisfyingCandidate,
-                prefixCandidate: self.prefixCandidate(remainingIn: newInputData),
+                prefixCandidate: self.prefixCandidate(remainingIn: newInputData, mazegakiTable: mazegakiTable),
                 cachedLattice: self.cachedLattice,
                 cachedLatticeInputData: self.cachedLatticeInputData
             )
@@ -81,29 +82,62 @@ extension Kana2Kanji {
             )
         }
 
-        func getNewConstraint(for newInputData: ComposingText) -> PrefixConstraint {
-            self.fixingPrefix(self.getReplaceableConstraint(for: newInputData), for: newInputData)
+        /// - Parameters:
+        ///   - mazegakiTable: 交ぜ書き変換の読み表。交ぜ書き変換が無効の場合は`nil`
+        func getNewConstraint(for newInputData: ComposingText, mazegakiTable: MazegakiReadingTable? = nil) -> PrefixConstraint {
+            self.fixingPrefix(self.getReplaceableConstraint(for: newInputData, mazegakiTable: mazegakiTable), for: newInputData, mazegakiTable: mazegakiTable)
         }
 
         /// 先頭の候補の読みが入力の先頭にそのまま残っていればその候補。残っていなければ nil で、以降は引き継がない。
-        func prefixCandidate(remainingIn newInputData: ComposingText) -> Candidate? {
+        func prefixCandidate(remainingIn newInputData: ComposingText, mazegakiTable: MazegakiReadingTable? = nil) -> Candidate? {
             guard let prefixCandidate,
-                  newInputData.convertTarget.toKatakana().hasPrefix(prefixCandidate.data.map(\.ruby).joined()) else {
+                  Self.prefixSurfaceCount(of: prefixCandidate, in: newInputData, mazegakiTable: mazegakiTable) != nil else {
                 return nil
             }
             return prefixCandidate
         }
 
+        /// 交ぜ書き変換の対象の入力（読み表があり、入力に漢字を含む）なら、その読み表
+        private static func mazegakiTable(_ table: MazegakiReadingTable?, for inputData: ComposingText) -> MazegakiReadingTable? {
+            guard let table, inputData.convertTarget.contains(where: { DicdataStore.isMazegakiConstrainedCharacter($0, table: table) }) else {
+                return nil
+            }
+            return table
+        }
+
+        /// 候補の語を順に入力の先頭に対応づけたとき、候補が覆う入力（カタカナ）の文字数。対応づけられなければ`nil`。
+        ///
+        /// 通常は ruby が入力の先頭にそのまま現れるかで判定する。交ぜ書き変換では ruby が入力漢字の読みになるので、
+        /// 表層と ruby を読み表で突き合わせる（破たん → 破綻 = ハタン は「破たん」の 3 文字を覆う）。
+        private static func prefixSurfaceCount(of candidate: Candidate, in newInputData: ComposingText, mazegakiTable: MazegakiReadingTable?) -> Int? {
+            let katakana = newInputData.convertTarget.toKatakana()
+            guard let table = Self.mazegakiTable(mazegakiTable, for: newInputData) else {
+                let ruby = candidate.data.map(\.ruby).joined()
+                return katakana.hasPrefix(ruby) ? ruby.count : nil
+            }
+            var surface = Array(katakana)[...]
+            var count = 0
+            for item in candidate.data {
+                guard let consumed = MazegakiSurfaceMatching.surfaceCount(of: item.word, ruby: item.ruby, in: surface, table: table) else {
+                    return nil
+                }
+                surface = surface.dropFirst(consumed)
+                count += consumed
+            }
+            return count
+        }
+
         /// 先頭の候補の読みが入力の先頭にそのまま残っている間、その表記を固定部分にする。
         /// 制約が表記で始まっていればその長さを固定し、始まっていなければ表記で置き換える。
-        private func fixingPrefix(_ constraint: PrefixConstraint, for newInputData: ComposingText) -> PrefixConstraint {
-            guard let prefixCandidate = self.prefixCandidate(remainingIn: newInputData) else {
+        private func fixingPrefix(_ constraint: PrefixConstraint, for newInputData: ComposingText, mazegakiTable: MazegakiReadingTable?) -> PrefixConstraint {
+            guard let prefixCandidate = self.prefixCandidate(remainingIn: newInputData, mazegakiTable: mazegakiTable) else {
                 return constraint
             }
             let fixed = Array(prefixCandidate.data.map(\.word).joined().utf8)
             let fixedPrefix = PrefixConstraint.FixedPrefix(
                 byteCount: fixed.count,
-                rubyCount: prefixCandidate.data.map(\.ruby).joined().count
+                rubyCount: Self.prefixSurfaceCount(of: prefixCandidate, in: newInputData, mazegakiTable: mazegakiTable)
+                    ?? prefixCandidate.data.map(\.ruby).joined().count
             )
             if constraint.constraint.hasPrefix(fixed) {
                 var fixedConstraint = constraint
@@ -114,8 +148,19 @@ extension Kana2Kanji {
         }
 
         /// モデルの評価で置き換わりうる制約。
-        private func getReplaceableConstraint(for newInputData: ComposingText) -> PrefixConstraint {
-            if let satisfyingCandidate {
+        private func getReplaceableConstraint(for newInputData: ComposingText, mazegakiTable: MazegakiReadingTable?) -> PrefixConstraint {
+            if let satisfyingCandidate, let table = Self.mazegakiTable(mazegakiTable, for: newInputData) {
+                // 交ぜ書き変換: 語ごとに、表層の先頭のどれだけを覆うかを読み表で突き合わせて求める
+                var surface = Array(newInputData.convertTarget.toKatakana())[...]
+                var constraint = [UInt8]()
+                for item in satisfyingCandidate.data {
+                    if let consumed = MazegakiSurfaceMatching.surfaceCount(of: item.word, ruby: item.ruby, in: surface, table: table) {
+                        constraint += item.word.utf8
+                        surface = surface.dropFirst(consumed)
+                    }
+                }
+                return PrefixConstraint(constraint)
+            } else if let satisfyingCandidate {
                 var current = newInputData.convertTarget.toKatakana()[...]
                 var constraint = [UInt8]()
                 for item in satisfyingCandidate.data {
@@ -205,8 +250,8 @@ extension Kana2Kanji {
                 composingText: inputData,
                 inputStyle: inputStyle
             ).droppedSuffixCount > 0
-        var constraint = zenzaiCache?.getNewConstraint(for: latticeInputData) ?? PrefixConstraint([])
-        let prefixCandidate = zenzaiCache?.prefixCandidate(remainingIn: latticeInputData)
+        var constraint = zenzaiCache?.getNewConstraint(for: latticeInputData, mazegakiTable: dicdataStoreState.mazegakiReadingTable) ?? PrefixConstraint([])
+        let prefixCandidate = zenzaiCache?.prefixCandidate(remainingIn: latticeInputData, mazegakiTable: dicdataStoreState.mazegakiReadingTable)
         let resolvedConversionCacheKey: ZenzResolvedConversionCacheKey? =
             if !requestRichCandidates,
                personalizationMode == nil,
@@ -243,7 +288,8 @@ extension Kana2Kanji {
             let nextCache = zenzaiCache?.updatingResult(
                 for: latticeInputData,
                 constraint: cached.prefixConstraint,
-                satisfyingCandidate: cached.satisfyingCandidate
+                satisfyingCandidate: cached.satisfyingCandidate,
+                mazegakiTable: dicdataStoreState.mazegakiReadingTable
             ) ?? ZenzaiCache(
                 latticeInputData,
                 constraint: cached.prefixConstraint,

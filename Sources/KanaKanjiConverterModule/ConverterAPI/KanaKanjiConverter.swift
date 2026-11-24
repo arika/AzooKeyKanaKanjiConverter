@@ -1188,7 +1188,7 @@ public final class KanaKanjiConverter {
 
         var result = consume fullCandidates
         // 3番目までに最低でも1つ、（誤り訂正ではなく）入力に完全一致する候補が入るようにする
-        let checkRuby: (Candidate) -> Bool = {$0.data.reduce(into: "") {$0 += $1.ruby} == inputData.convertTarget.toKatakana()}
+        let checkRuby: (Candidate) -> Bool = { self.isExactMatchCandidate($0, convertTarget: inputData.convertTarget) }
         if !result.prefix(3).contains(where: checkRuby) {
             if let candidateIndex = result.dropFirst(3).firstIndex(where: checkRuby) {
                 // 3番目以降にある場合は順位を入れ替える
@@ -1384,6 +1384,22 @@ public final class KanaKanjiConverter {
             }
         }
         return count(candidate.composingCount)
+    }
+
+    /// 候補が、誤り訂正ではなく入力に完全一致するか（候補の ruby が入力を読んだものか）
+    ///
+    /// 交ぜ書き変換では、入力漢字を読み表の読みで読んだ ruby も完全一致とみなす（破たん → 破綻 = ハタン）。
+    package func isExactMatchCandidate(_ candidate: Candidate, convertTarget: String) -> Bool {
+        let ruby = candidate.data.reduce(into: "") { $0 += $1.ruby }
+        let katakana = convertTarget.toKatakana()
+        if ruby == katakana {
+            return true
+        }
+        guard let table = self.dicdataStoreState.mazegakiReadingTable,
+              convertTarget.contains(where: { DicdataStore.isMazegakiConstrainedCharacter($0, table: table) }) else {
+            return false
+        }
+        return MazegakiSurfaceMatching.matchesWhole(surface: Array(katakana), ruby: Array(ruby), table: table)
     }
 
     /// 交ぜ書き変換が有効で、入力に漢字が含まれるか
