@@ -5,7 +5,7 @@ import XCTest
 /// Step 3: 交ぜ書きの候補では ruby と convertTarget が一致しない。その前提に依存していた処理のテスト
 final class MazegakiRubyTests: XCTestCase {
     private static let readingTable = """
-    破\tハ,ヤブ.ル,ヤブ.レル
+    破\tハ
     損\tソン,ソコ.ナウ
     毀\tキ,コワ.ス
     取\tシュ,ト.ル
@@ -96,6 +96,34 @@ final class MazegakiRubyTests: XCTestCase {
             XCTAssertFalse(top3.contains { $0.text == passThrough }, "\(input): \(top3.map(\.text))")
             // 上位 3 件は値の順に並ぶ（割り込みがない）
             XCTAssertEqual(top3.map(\.value), top3.map(\.value).sorted(by: >), "\(input): \(top3.map(\.text))")
+        }
+    }
+
+    // MARK: - E8: 予測変換
+
+    func testPredictionUsesCandidateRuby() {
+        // 「破た」から、候補の ruby ハタ で予測して「破綻」を出す（テスト用の表では 破 の読みはハだけ）
+        let converter = KanaKanjiConverter.withDefaultDictionary()
+        let result = converter.requestCandidates(self.composingText("破た"), options: self.options(prediction: .manualMix))
+        XCTAssertTrue(result.predictionResults.contains { $0.text == "破綻" }, result.predictionResults.map(\.text).description)
+    }
+
+    func testPredictionKeepsInputKanji() {
+        let converter = KanaKanjiConverter.withDefaultDictionary()
+        for input in ["破た", "毀そ", "取ひ", "き損"] {
+            let result = converter.requestCandidates(self.composingText(input), options: self.options(prediction: .manualMix))
+            let kanji = input.filter { $0.unicodeScalars.first!.properties.isIdeographic }
+            for candidate in result.predictionResults {
+                var rest = candidate.text[...]
+                for k in kanji {
+                    guard let index = rest.firstIndex(of: k) else {
+                        XCTFail("\(input): \(candidate.text)")
+                        break
+                    }
+                    rest = rest[rest.index(after: index)...]
+                }
+            }
+            converter.stopComposition()
         }
     }
 }

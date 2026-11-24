@@ -154,7 +154,7 @@ extension Kana2Kanji {
     ///     この関数の役割は意味連接の考慮にある。
     func getPredictionCandidates(composingText: ComposingText, prepart: CandidateData, lastClause: ClauseDataUnit, N_best: Int, dicdataStoreState: DicdataStoreState) -> [Candidate] {
         debug(#function, composingText, lastClause.ranges, lastClause.text)
-        let lastRuby = lastClause.ranges.reduce(into: "") {
+        let surfaceRuby = lastClause.ranges.reduce(into: "") {
             let ruby = switch $1 {
             case let .input(left, right):
                 ComposingText.getConvertTarget(for: composingText.input[left..<right]).toKatakana()
@@ -163,7 +163,9 @@ extension Kana2Kanji {
             }
             $0.append(ruby)
         }
-        let lastRubyCount = lastRuby.count
+        // 最後の文節が覆う表層の長さ
+        let lastSurfaceCount = surfaceRuby.count
+        var lastRuby = surfaceRuby
         let datas: [DicdataElement]
         do {
             var _str = ""
@@ -178,6 +180,21 @@ extension Kana2Kanji {
             }
             datas = Array(prepart.data.prefix(count))
         }
+        // 交ぜ書き変換: 最後の文節に入力漢字があれば、表層ではなく候補の ruby から予測する（破た → ハタ → 破綻）。
+        // 予測した語には、表層と ruby の突き合わせで求めた制約で整合判定をかけ、入力漢字が消える語（ハタ → 畑）を除く
+        var mazegakiConstraintSets: [[MazegakiConstraint]]?
+        if let table = dicdataStoreState.mazegakiReadingTable,
+           surfaceRuby.contains(where: { DicdataStore.isMazegakiConstrainedCharacter($0, table: table) }) {
+            let clauseRuby = prepart.data[datas.count...].reduce(into: "") { $0.append($1.ruby) }
+            let matches = MazegakiSurfaceMatching.matches(surface: Array(surfaceRuby)[...], ruby: Array(clauseRuby), table: table)
+                .filter { $0.surfaceCount == lastSurfaceCount }
+            guard !matches.isEmpty else {
+                // 入力漢字を保てる予測ができない
+                return []
+            }
+            lastRuby = clauseRuby
+            mazegakiConstraintSets = matches.map(\.constraints)
+        }
 
         let osuserdict: [DicdataElement] = dicdataStore.getPrefixMatchDynamicUserDict(lastRuby, state: dicdataStoreState)
 
@@ -185,7 +202,7 @@ extension Kana2Kanji {
         let lastRcid: Int = lastCandidate.data.last?.rcid ?? CIDData.BOS.cid
         let nextLcid: Int = prepart.lastClause?.nextLcid ?? CIDData.BOS.cid
         let lastMid: Int = lastCandidate.lastMid
-        let composingCount: ComposingCount = .composite(lastCandidate.composingCount, .surfaceCount(lastRubyCount))
+        let composingCount: ComposingCount = .composite(lastCandidate.composingCount, .surfaceCount(lastSurfaceCount))
         let ignoreCCValue: PValue = self.dicdataStore.getCCValue(lastRcid, nextLcid)
 
         let inputStyle = composingText.input.last?.inputStyle ?? .direct
@@ -207,7 +224,7 @@ extension Kana2Kanji {
                     break
                 }
                 let possibleNexts: [Substring] = table.possibleNexts[String(roman), default: []].map {ruby + $0}
-                debug(#function, lastRuby, ruby, roman, possibleNexts, prepart, lastRubyCount)
+                debug(#function, lastRuby, ruby, roman, possibleNexts, prepart, lastSurfaceCount)
                 dicdata = possibleNexts.flatMap { self.dicdataStore.getPredictionLOUDSDicdata(key: $0, state: dicdataStoreState, includeExactMatch: true) }
             } else {
                 debug(#function, lastRuby, "roman == \"\"")
@@ -220,6 +237,11 @@ extension Kana2Kanji {
         result.reserveCapacity(N_best &+ 1)
         let ccLatter = self.dicdataStore.getCCLatter(lastRcid)
         for data in (dicdata + osuserdict) {
+            if let mazegakiConstraintSets, !mazegakiConstraintSets.contains(where: {
+                MazegakiAlignment.matches(word: data.word, ruby: Array(data.ruby), constraints: $0)
+            }) {
+                continue
+            }
             let includeMMValueCalculation = DicdataStore.includeMMValueCalculation(data)
             let mmValue: PValue = includeMMValueCalculation ? self.dicdataStore.getMMValue(lastMid, data.mid) : .zero
             let ccValue: PValue = ccLatter.get(data.lcid)
