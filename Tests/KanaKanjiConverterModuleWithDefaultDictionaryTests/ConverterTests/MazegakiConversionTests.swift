@@ -152,6 +152,13 @@ final class MazegakiConversionTests: XCTestCase {
         }
     }
 
+    func testAbsorbingWordIsPreferredOverPassThrough() {
+        // かなと入力漢字をまとめて読む語が、素通しの組み合わせ（四面 + ソ + 歌 など）より上に来る
+        XCTAssertEqual(self.texts("破たん", mode: self.on).first, "破綻")
+        XCTAssertEqual(self.texts("四面そ歌", mode: self.on).first, "四面楚歌")
+        XCTAssertEqual(self.texts("取ひき", mode: self.on).first, "取引")
+    }
+
     func testDuplicateTextKeepsBetterReading() {
         // 貴社 は 貴社/キシャ と 貴/キ + 社/ヤシロ の 2 つの経路で出る。ruby の長さではなく値で選ぶ
         XCTAssertTrue(self.texts("き社", mode: self.on).prefix(5).contains("貴社"))

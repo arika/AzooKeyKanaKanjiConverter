@@ -638,8 +638,9 @@ public final class DicdataStore {
 
         // MARK: 交ぜ書き変換: 入力漢字を読みに展開したキーで引き、整合判定を通った語を加える
         if let mazegakiTable, let surfaceProcessRange {
+            let surface = Array(composingText.convertTarget.toKatakana())
             let generator = MazegakiGenerator(
-                surface: Array(composingText.convertTarget.toKatakana()),
+                surface: surface,
                 range: surfaceProcessRange,
                 table: mazegakiTable
             )
@@ -662,8 +663,12 @@ public final class DicdataStore {
                         }
                     }
                     for (endIndex, penalty) in best {
-                        let adjust = -Self.mazegakiPenaltyWeight * penalty
-                        if !adjust.isZero, self.shouldBeRemoved(value: element.value() + adjust, wordCount: rubyArray.count) {
+                        // 入力のかなを取り込んだ字数（語の範囲にある、入力漢字以外の文字の数）
+                        let absorbed = surface[surfaceProcessRange.leftIndex ... endIndex].count {
+                            !Self.isMazegakiConstrainedCharacter($0, table: mazegakiTable)
+                        }
+                        let adjust = -Self.mazegakiPenaltyWeight * penalty + Self.mazegakiAbsorptionBonus * PValue(absorbed)
+                        if adjust < 0, self.shouldBeRemoved(value: element.value() + adjust, wordCount: rubyArray.count) {
                             continue
                         }
                         appendNode((copy element).adjustedData(adjust), endIndex: .surface(endIndex))
@@ -1248,7 +1253,12 @@ extension DicdataStore {
     }
 
     /// 読みのペナルティ 1 あたりに、語の値から引く量
-    static let mazegakiPenaltyWeight: PValue = 1.0
+    static let mazegakiPenaltyWeight: PValue = 0.5
+    /// 交ぜ書きで展開した語が、入力のかなを 1 字取り込むごとに、語の値に足す量
+    ///
+    /// 入力漢字を素通しした組み合わせ（間 + 聯）より、かなと漢字をまとめて読む語（関聯）を優先するため。
+    /// 素通しの語にペナルティを付けると、ラティスの刈り込み（`shouldBeRemoved`）で受け皿ごと消えるので、ボーナスにする。
+    static let mazegakiAbsorptionBonus: PValue = 2.0
 
     /// 交ぜ書き変換で制約の対象になる文字（読み表にある字と、表意文字）か
     static func isMazegakiConstrainedCharacter(_ character: Character, table: MazegakiReadingTable) -> Bool {
