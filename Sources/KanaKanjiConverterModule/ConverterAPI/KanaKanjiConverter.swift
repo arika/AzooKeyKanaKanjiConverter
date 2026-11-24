@@ -551,7 +551,7 @@ public final class KanaKanjiConverter {
         textIndex.reserveCapacity(candidates.underestimatedCount)
         for candidate in candidates where !candidate.text.isEmpty && !seenCandidates.contains(candidate.text) {
             if let index = textIndex[candidate.text] {
-                if result[index].value < candidate.value || result[index].rubyCount < candidate.rubyCount {
+                if result[index].value < candidate.value || self.candidateLength(result[index]) < self.candidateLength(candidate) {
                     result[index] = candidate
                 }
             } else {
@@ -957,6 +957,10 @@ public final class KanaKanjiConverter {
     /// - Note:
     ///   現在の実装は非常に複雑な方法で候補の順序を決定している。
     private func processResult(inputData: ComposingText, result: (result: LatticeNode, lattice: Lattice), options: ConvertRequestOptions) -> ConversionResult {
+        self.isProcessingMazegakiInput = self.isMazegakiInput(inputData)
+        defer {
+            self.isProcessingMazegakiInput = false
+        }
         self.updateCurrentSessionState {
             $0.previousInputData = inputData
             $0.lattice = result.lattice
@@ -1126,20 +1130,20 @@ public final class KanaKanjiConverter {
         )
 
         var firstClauseResults = uniqueFirstClauseCandidates.min(count: 5) {
-            if $0.rubyCount == $1.rubyCount {
+            if self.candidateLength($0) == self.candidateLength($1) {
                 $0.value > $1.value
             } else {
-                $0.rubyCount > $1.rubyCount
+                self.candidateLength($0) > self.candidateLength($1)
             }
         }
         // 重複のない変換候補を作成するための集合
         var seenCandidate: Set<String> = fullCandidates.mapSet {$0.text}
         // 文節のみ変換するパターン（上位5件）
         let firstClauseCandidates = self.getUniqueCandidate(consume uniqueFirstClauseCandidates, seenCandidates: seenCandidate).min(count: 5) {
-            if $0.rubyCount == $1.rubyCount {
+            if self.candidateLength($0) == self.candidateLength($1) {
                 $0.value > $1.value
             } else {
-                $0.rubyCount > $1.rubyCount
+                self.candidateLength($0) > self.candidateLength($1)
             }
         }
         for c in firstClauseCandidates {
@@ -1165,8 +1169,8 @@ public final class KanaKanjiConverter {
                 self.getUniqueCandidate((consume dicCandidates).chained(consume additionalCandidates), seenCandidates: seenCandidate),
                 matchingPrefix: prefixText
             ).sorted {
-                let count0 = $0.rubyCount
-                let count1 = $1.rubyCount
+                let count0 = self.candidateLength($0)
+                let count1 = self.candidateLength($1)
                 return count0 == count1 ? $0.value > $1.value : count0 > count1
             }
             for c in candidates {
@@ -1370,6 +1374,26 @@ public final class KanaKanjiConverter {
             return next
         }
         self.purgeZenzaiMemoizationCache()
+    }
+
+    /// `processResult`の処理中の入力が、交ぜ書き変換の対象（交ぜ書きモードで、入力に漢字を含む）か
+    private var isProcessingMazegakiInput = false
+
+    /// 候補の長さ。同じ文字列の候補の選択や、文節・単語の候補の並べ替えに使う。
+    ///
+    /// 通常は ruby の長さを、覆う入力の量の代わりに使う。交ぜ書き変換では、同じ入力範囲でも選んだ読みによって
+    /// ruby の長さが変わる（社: シャ / ヤシロ）ので、覆う入力の量（`composingCount`）を使う。
+    private func candidateLength(_ candidate: Candidate) -> Int {
+        guard self.isProcessingMazegakiInput else {
+            return candidate.rubyCount
+        }
+        func count(_ composingCount: ComposingCount) -> Int {
+            switch composingCount {
+            case .inputCount(let n), .surfaceCount(let n): n
+            case .composite(let l, let r): count(l) + count(r)
+            }
+        }
+        return count(candidate.composingCount)
     }
 
     /// 交ぜ書き変換が有効で、入力に漢字が含まれるか
