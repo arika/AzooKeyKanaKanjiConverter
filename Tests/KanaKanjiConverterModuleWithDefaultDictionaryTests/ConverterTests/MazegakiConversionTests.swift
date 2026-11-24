@@ -28,6 +28,8 @@ final class MazegakiConversionTests: XCTestCase {
     画\tガ,カク
     社\tシャ,ヤシロ
     本\tホン,モト
+    走\tソウ,ハシ.ル
+    見\tケン,ミ.ル
     棚\tホウ,タナ
     """
 
@@ -145,10 +147,10 @@ final class MazegakiConversionTests: XCTestCase {
         XCTAssertFalse(self.texts("桜づけ", mode: self.on).contains { $0.contains("櫻") })
     }
 
-    func testSameAsInputCandidateIsDemoted() {
-        let candidates = self.texts("破たん", mode: self.on)
-        if let index = candidates.firstIndex(of: "破たん") {
-            XCTAssertGreaterThanOrEqual(index, min(5, candidates.count - 1))
+    func testCorrectlyTypedInputStaysFirst() {
+        // 正しく打ち終えた交ぜ書きの文字列は、そのまま 1 位に残る（入力と同じ文字列の候補を下げない）
+        for input in ["取り引き", "彼は走った", "見る"] {
+            XCTAssertEqual(self.texts(input, mode: self.on).first, input)
         }
     }
 
@@ -164,8 +166,8 @@ final class MazegakiConversionTests: XCTestCase {
         XCTAssertTrue(self.texts("き社", mode: self.on).prefix(5).contains("貴社"))
     }
 
-    func testKanjiOnlyInputIsNotDemoted() {
-        // 入力が漢字だけで、正解が入力と同じ文字列の場合は降格しない
+    func testKanjiOnlyInputStaysFirst() {
+        // 入力が漢字だけで、正解が入力と同じ文字列の場合
         XCTAssertEqual(self.texts("本棚", mode: self.on).first, "本棚")
     }
 

@@ -35,8 +35,6 @@ public final class KanaKanjiConverter {
         var lastData: DicdataElement?
     }
     private static let defaultSessionID = ConversionSessionID(rawValue: "default")
-    /// 交ぜ書き変換で、入力と同じ文字列の候補を移す位置
-    static let mazegakiSameAsInputCandidateIndex = 5
 
     public init(dicdataStore: DicdataStore) {
         self.converter = .init(dicdataStore: dicdataStore)
@@ -1208,15 +1206,6 @@ public final class KanaKanjiConverter {
 
         result = self.candidates(consume result, matchingPrefix: prefixText)
         predictionResults = self.candidates(consume predictionResults, matchingPrefix: prefixText)
-        // 交ぜ書き変換では、入力と同じ文字列の候補（かなを変換せずに残したもの）を下位へ回す。
-        // 入力が漢字だけの場合（本棚）は、入力と同じ文字列が正解であることが多いので対象外
-        if self.isProcessingMazegakiInput, inputData.convertTarget.contains(where: Self.isKana) {
-            let sameAsInput = result.indices.filter { result[$0].text == inputData.convertTarget }
-            if !sameAsInput.isEmpty, sameAsInput.first! < Self.mazegakiSameAsInputCandidateIndex {
-                let moved = sameAsInput.reversed().map { result.remove(at: $0) }.reversed()
-                result.insert(contentsOf: moved, at: min(result.endIndex, Self.mazegakiSameAsInputCandidateIndex))
-            }
-        }
 
         result.mutatingForEach { item in
             self.prepareCandidateForResult(&item, prefixCandidate: prefixCandidate)
@@ -1395,10 +1384,6 @@ public final class KanaKanjiConverter {
             }
         }
         return count(candidate.composingCount)
-    }
-
-    private static func isKana(_ character: Character) -> Bool {
-        character.unicodeScalars.allSatisfy { (0x3041 ... 0x3096).contains($0.value) || (0x30A1 ... 0x30FA).contains($0.value) || $0.value == 0x30FC }
     }
 
     /// 交ぜ書き変換が有効で、入力に漢字が含まれるか
