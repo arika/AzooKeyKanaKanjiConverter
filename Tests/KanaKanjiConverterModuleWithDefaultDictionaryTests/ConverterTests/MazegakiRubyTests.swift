@@ -126,4 +126,66 @@ final class MazegakiRubyTests: XCTestCase {
             converter.stopComposition()
         }
     }
+
+    // MARK: - 打鍵ごとの差分更新
+
+    private func texts(_ result: ConversionResult) -> [String] {
+        result.mainResults.map(\.text)
+    }
+
+    func testIncrementalInputMatchesBatchInput() {
+        for input in ["破たん", "き損", "取ひき", "計画が破たんしかけている", "その件はき損にあたる"] {
+            let batch = KanaKanjiConverter.withDefaultDictionary()
+                .requestCandidates(self.composingText(input), options: self.options())
+
+            let converter = KanaKanjiConverter.withDefaultDictionary()
+            var text = ComposingText()
+            var incremental: ConversionResult!
+            for character in input {
+                text.insertAtCursorPosition(String(character), inputStyle: .direct)
+                incremental = converter.requestCandidates(text, options: self.options())
+            }
+            XCTAssertEqual(self.texts(incremental), self.texts(batch), input)
+        }
+    }
+
+    func testDeletingAndRetypingMatchesBatchInput() {
+        // 「破たんx」と打ってから x を消して「し」を打つ（差分更新で、消した部分のノードが残らないこと）
+        let batch = KanaKanjiConverter.withDefaultDictionary()
+            .requestCandidates(self.composingText("破たんし"), options: self.options())
+
+        let converter = KanaKanjiConverter.withDefaultDictionary()
+        var text = ComposingText()
+        for character in "破たんか" {
+            text.insertAtCursorPosition(String(character), inputStyle: .direct)
+            _ = converter.requestCandidates(text, options: self.options())
+        }
+        text.deleteBackwardFromCursorPosition(count: 1)
+        _ = converter.requestCandidates(text, options: self.options())
+        text.insertAtCursorPosition("し", inputStyle: .direct)
+        let retyped = converter.requestCandidates(text, options: self.options())
+        XCTAssertEqual(self.texts(retyped), self.texts(batch))
+    }
+
+    // MARK: - 学習
+
+    func testLearnedMazegakiCandidateComesFirst() throws {
+        let memoryDirectory = FileManager.default.temporaryDirectory.appendingPathComponent("mazegaki-learning-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: memoryDirectory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: memoryDirectory) }
+        var options = self.options()
+        options.learningType = .inputAndOutput
+        options.memoryDirectoryURL = memoryDirectory
+
+        let converter = KanaKanjiConverter.withDefaultDictionary()
+        let first = converter.requestCandidates(self.composingText("き損"), options: options)
+        // 学習前は 棄損 が 1 位（辞書の値による）
+        XCTAssertEqual(first.mainResults.first?.text, "棄損")
+        let kison = try XCTUnwrap(first.mainResults.first { $0.text == "毀損" })
+        converter.updateLearningData(kison)
+        converter.stopComposition()
+
+        let second = converter.requestCandidates(self.composingText("き損"), options: options)
+        XCTAssertEqual(second.mainResults.first?.text, "毀損", second.mainResults.prefix(5).map(\.text).description)
+    }
 }
