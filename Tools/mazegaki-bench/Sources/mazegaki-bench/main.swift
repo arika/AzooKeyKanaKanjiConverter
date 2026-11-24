@@ -42,6 +42,8 @@ struct TestCase {
     /// expected 以外の正解（1 つのキーに正解が複数ある評価セット用）
     var alternatives: [String] = []
     var answers: [String] { (expected.map { [$0] } ?? []) + alternatives }
+    /// 正解の語の区切り（文の評価セットの 5 列目。| で区切る）。打鍵の途中の崩れを数えるのに使う
+    var words: [String]? = nil
 }
 
 func loadCases(_ path: String) -> [TestCase] {
@@ -54,7 +56,8 @@ func loadCases(_ path: String) -> [TestCase] {
         let cols = line.split(separator: "\t", omittingEmptySubsequences: false).map(String.init)
         guard cols.count >= 3 else { return nil }
         let answers = cols[2].split(separator: ",").map(String.init)
-        return TestCase(category: cols[0], input: cols[1], expected: answers.first, alternatives: Array(answers.dropFirst()))
+        let words = cols.count >= 5 && !cols[4].isEmpty ? cols[4].split(separator: "|").map(String.init) : nil
+        return TestCase(category: cols[0], input: cols[1], expected: answers.first, alternatives: Array(answers.dropFirst()), words: words)
     }
 }
 
@@ -574,6 +577,22 @@ struct Outcome {
     var combos: Int
     var kanjiLost: Bool      // 上位 showCount 件に、入力漢字が消えた候補がある
     var top1: String
+    /// 打鍵の途中で、1 位の先頭から正解の語が続けて一致する数が減った回数（減った語の数の合計）。正解の語の区切りがある場合だけ
+    var regressions: Int? = nil
+    /// そのうち、2 語以上まとめて減った回数
+    var deepRegressions: Int? = nil
+}
+
+/// 候補の先頭から、正解の語がいくつ続けて一致するか
+func matchedWordCount(_ text: String, _ words: [String]) -> Int {
+    var rest = Substring(text)
+    var count = 0
+    for w in words {
+        guard rest.hasPrefix(w) else { break }
+        rest = rest.dropFirst(w.count)
+        count += 1
+    }
+    return count
 }
 
 let showCount = 8
@@ -631,6 +650,8 @@ for tc in cases {
     var note = ""
     var combos = 1
     var literalText = ComposingText()
+    var regressions: Int? = nil
+    var deepRegressions: Int? = nil
 
     if expandMode {
         var r: ExpandResult!
@@ -645,10 +666,21 @@ for tc in cases {
     } else {
         // 1 文字ずつ入力（漢直 IM で打鍵ごとに変換を回す想定）。最終打鍵の時間を記録
         var result: ConversionResult!
+        var matched = 0
+        if tc.words != nil { regressions = 0; deepRegressions = 0 }
         for ch in (batchInput ? [tc.input] : tc.input.map(String.init)) {
             literalText.insertAtCursorPosition(ch, inputStyle: .direct)
             let elapsed = clock.measure { result = converter.requestCandidates(literalText, options: options) }
             latency = allKeystrokes ? max(latency, ms(elapsed)) : ms(elapsed)
+            // ライブ変換で、一度正しく出た前半の語が後の打鍵で崩れた回数
+            if let words = tc.words {
+                let now = matchedWordCount(result.mainResults.first?.text ?? "", words)
+                if now < matched {
+                    regressions! += 1
+                    if now <= matched - 2 { deepRegressions! += 1 }
+                }
+                matched = now
+            }
         }
         converter.stopComposition()
         candidates = result.mainResults
@@ -682,7 +714,8 @@ for tc in cases {
     // 部分候補（入力の先頭だけを変換した候補）は、その候補が覆う範囲の漢字だけを見る
     let kanjiLost = candidates.prefix(showCount).contains { !preservesKanji(input: coveredPrefix($0, tc.input), candidate: $0.text) }
     outcomes.append(.init(testCase: tc, rank: rank, latency: latency, combos: combos,
-                          kanjiLost: kanjiLost, top1: candidates.first?.text ?? ""))
+                          kanjiLost: kanjiLost, top1: candidates.first?.text ?? "",
+                          regressions: regressions, deepRegressions: deepRegressions))
 }
 
 // MARK: - 集計
@@ -704,6 +737,18 @@ if !scored.isEmpty {
         let worst = os.map(\.latency).max() ?? 0
         print("\(pad(cat, 12)) \(String(format: "%4d %4d %6d %5d %5d %8.1f %8.1f", os.count, top1, top5, found, os.count - found, avg, worst))")
     }
+    let withWords = scored.filter { $0.regressions != nil }
+    if !withWords.isEmpty {
+        print("\n打鍵の途中の崩れ（1 位の先頭で一致する正解の語の数が減った打鍵）:")
+        for cat in categories + ["全体"] {
+            let os = cat == "全体" ? withWords : withWords.filter { $0.testCase.category == cat }
+            guard !os.isEmpty else { continue }
+            let total = os.compactMap(\.regressions).reduce(0, +)
+            let deep = os.compactMap(\.deepRegressions).reduce(0, +)
+            let cases = os.filter { ($0.regressions ?? 0) > 0 }.count
+            print("\(pad(cat, 12)) \(String(format: "崩れ %4d 回（うち 2 語以上 %4d 回）、崩れのあった文 %3d / %3d", total, deep, cases, os.count))")
+        }
+    }
     let lost = scored.filter(\.kanjiLost)
     print("\n入力漢字の消失（上位\(showCount)件に含むケース）: \(lost.count)件"
           + (lost.isEmpty ? "" : "  例: " + lost.prefix(20).map(\.testCase.input).joined(separator: ", ")))
@@ -715,11 +760,12 @@ if !scored.isEmpty {
 }
 
 if let outPath {
-    var lines = ["# カテゴリ\t入力\t正解\t順位\t1位\tms\t漢字消失"]
+    var lines = ["# カテゴリ\t入力\t正解\t順位\t1位\tms\t漢字消失\t崩れ\t崩れ(2語以上)"]
     for o in outcomes {
         lines.append([o.testCase.category, o.testCase.input, o.testCase.answers.joined(separator: ","),
                       o.rank.map(String.init) ?? "-", o.top1, String(format: "%.2f", o.latency),
-                      o.kanjiLost ? "1" : "0"].joined(separator: "\t"))
+                      o.kanjiLost ? "1" : "0",
+                      o.regressions.map(String.init) ?? "-", o.deepRegressions.map(String.init) ?? "-"].joined(separator: "\t"))
     }
     try lines.joined(separator: "\n").appending("\n").write(toFile: outPath, atomically: true, encoding: .utf8)
     print("結果を書き出しました: \(outPath)")
