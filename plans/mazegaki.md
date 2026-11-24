@@ -398,6 +398,11 @@ D を外した場合（C+E、試作 exp/zenzai-ce）と、文の評価セット:
   - Zenzai を自動的に切るのではなく、モデルの訂正が入力漢字と両立しない場面だけを扱うので、「Zenzai は `zenzaiMode` の指定どおり」の方針と矛盾しない。
   - テスト: `ZenzaiCache` の単体テストと、モデルを使う結合テスト（`MazegakiZenzaiTests`、trait `Zenzai` のときだけ。モデルの場所は `MAZEGAKI_ZENZAI_WEIGHT`）。
 
+- 2026-11-24（Step 4 の後）: エンジン側の作業をここで区切り、Desktop のフォークで実際の使い勝手を確かめる。
+  - upstream への提案（PR・Issue、Vision の扱い、rebase）は、試用したのちに改めて考える。それまでは手を付けない。
+  - 入力の途中で `zenzaiMode` を切り替えたときの動作は、IM の実際の使い方ではあまり起きないので後回しにする。upstream の動作に従えば十分と考える。
+  - 受け入れ基準「内蔵 1 位 46/52 以上」は 45 のまま（Zenzai オフ。Step 3 の E11 以降変わらない）。外れた 7 件は、入力漢字の制約を満たす同音の実在語（き損 → 棄損、こう正 → 公正、帰のう → 帰農、ほか 1 件）、熟字訓 1 件、かなだけの対照 2 件で、交ぜ書きの処理で直すものは残っていない。
+
 ## 公開用ブランチ `mazegaki` の更新
 
 - Step ごとに PR ブランチを `mazegaki` へ merge する。Desktop のフォークは `mazegaki` の commit を revision で参照する。
