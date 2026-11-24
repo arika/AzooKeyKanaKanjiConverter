@@ -11,6 +11,7 @@ import KanaKanjiConverterModuleWithDefaultDictionary
 //   --limit N           Zenzai の inferenceLimit（既定 1）
 //   --expand            「漢字を開く」方式で変換する（既定は入力そのまま＝漢字を素通し）
 //   --cap N             --expand 時に試す読み組合せの上限（既定 32）
+//   --prediction M      日本語の予測変換の設定（autoMix〔既定〕/ manualMix / disabled）。分析用
 //   --mazegaki          エンジン組み込み版（ConvertRequestOptions.mazegakiMode）で変換する。入力の仕方は素通しと同じ
 //                       （1 文字ずつ入力して最後の 1 打鍵の時間を計る）。読み表は --reading-table、上限は --max-readings
 //   --reading-table P   読み表のパス（既定 data/kanji_readings.tsv）
@@ -130,6 +131,7 @@ var modelPath = "models/zenz-v3.1-small-Q5_K_M.gguf"
 var inferenceLimit = 1
 var expandMode = false
 var mazegakiMode = false
+var predictionMode = ConvertRequestOptions.PredictionMode.autoMix
 var comboCap = 32
 enum ReadingRules: String { case legacy, library }
 var readingRules = ReadingRules.legacy
@@ -149,6 +151,13 @@ do {
         case "--limit": inferenceLimit = Int(it.next() ?? "") ?? inferenceLimit
         case "--expand": expandMode = true
         case "--mazegaki": mazegakiMode = true
+        case "--prediction":
+            switch it.next() {
+            case "autoMix": predictionMode = .autoMix
+            case "manualMix": predictionMode = .manualMix
+            case "disabled": predictionMode = .disabled
+            default: print("--prediction は autoMix / manualMix / disabled"); exit(1)
+            }
         case "--cap": comboCap = Int(it.next() ?? "") ?? comboCap
         case "--readings":
             guard let r = it.next().flatMap(ReadingRules.init(rawValue:)) else { print("--readings は legacy か library"); exit(1) }
@@ -188,7 +197,7 @@ let dataDir = FileManager.default.temporaryDirectory
 try FileManager.default.createDirectory(at: dataDir, withIntermediateDirectories: true)
 
 let options = ConvertRequestOptions(
-    requireJapanesePrediction: .autoMix,   // 0.11.x では Bool（true）。fddde10 以降は PredictionMode
+    requireJapanesePrediction: predictionMode,   // 0.11.x では Bool（true）。fddde10 以降は PredictionMode
     requireEnglishPrediction: .disabled,
     keyboardLanguage: .ja_JP,
     learningType: .nothing,
