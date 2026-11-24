@@ -1045,7 +1045,7 @@ public final class KanaKanjiConverter {
 
         var predictionResults: [Candidate] = []
         var englishPredictionResults: [Candidate] = []
-        let fullCandidates: [Candidate]
+        var fullCandidates: [Candidate]
         do {
             // 予測変換を最大3件作成する（必要な場合のみsumsを構築）
             let bestThreePredictionCandidates: [Candidate]
@@ -1109,6 +1109,17 @@ public final class KanaKanjiConverter {
                 )
             } else {
                 fullCandidates = mixedCandidates.min(count: 5, sortedBy: {$0.value > $1.value})
+            }
+        }
+        // 交ぜ書き変換で予測変換を混ぜる場合は、入力全体を変換した最良の候補を 1 位に置く。
+        // 交ぜ書きの入力では漢字を打っているので、打ったとおりの変換を優先する。予測（牽引 → 牽引車）はその後に並べる
+        if self.isProcessingMazegakiInput, options.requireJapanesePrediction.shouldMix, let best = bestFiveSentenceCandidates.first {
+            if let index = fullCandidates.firstIndex(where: { $0.text == best.text }) {
+                if index > 0 {
+                    fullCandidates.insert(fullCandidates.remove(at: index), at: 0)
+                }
+            } else {
+                fullCandidates.insert(best, at: 0)
             }
         }
         // 文節のみ変換するパターン（上位5件）

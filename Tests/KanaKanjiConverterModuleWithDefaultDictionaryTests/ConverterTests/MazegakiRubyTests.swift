@@ -127,6 +127,30 @@ final class MazegakiRubyTests: XCTestCase {
         }
     }
 
+    func testWholeInputConversionStaysFirstWhenPredictionIsMixed() {
+        // 予測変換を本文に混ぜる設定（autoMix）でも、交ぜ書きの入力では、入力全体を変換した候補を 1 位に置く。
+        // 予測（牽引車、改竄者 など）は 1 位の後に残る
+        for (input, expected) in [("けん引", "牽引"), ("改ざん", "改竄")] {
+            let result = KanaKanjiConverter.withDefaultDictionary()
+                .requestCandidates(self.composingText(input), options: self.options(prediction: .autoMix))
+            XCTAssertEqual(result.mainResults.first?.text, expected, "\(input): \(result.mainResults.prefix(5).map(\.text))")
+        }
+        let result = KanaKanjiConverter.withDefaultDictionary()
+            .requestCandidates(self.composingText("けん引"), options: self.options(prediction: .autoMix))
+        XCTAssertTrue(result.mainResults.prefix(5).contains { $0.text.hasPrefix("牽引") && $0.text != "牽引" }, result.mainResults.prefix(5).map(\.text).description)
+    }
+
+    func testKanaInputWithMixedPredictionIsUnchanged() {
+        // かなだけの入力では、予測を混ぜたときの並びも .off と同じ
+        for input in ["けんいん", "はたん", "きょうはいいてんき"] {
+            let on = KanaKanjiConverter.withDefaultDictionary()
+                .requestCandidates(self.composingText(input), options: self.options(prediction: .autoMix))
+            let off = KanaKanjiConverter.withDefaultDictionary()
+                .requestCandidates(self.composingText(input), options: self.options(mazegaki: false, prediction: .autoMix))
+            XCTAssertEqual(on.mainResults.map(\.text), off.mainResults.map(\.text), input)
+        }
+    }
+
     // MARK: - 打鍵ごとの差分更新
 
     private func texts(_ result: ConversionResult) -> [String] {
